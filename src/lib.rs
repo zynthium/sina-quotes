@@ -46,6 +46,7 @@ pub mod poll;         // HTTP 轮询
 pub mod rangeset;     // RangeSet 数据结构
 pub mod series;       // K 线序列
 pub mod stream;       // 实时行情流
+pub mod symbols;      // 外盘期货品种符号
 pub mod types;        // 数据类型
 pub mod ws;           // WebSocket 订阅
 pub mod ws_service;   // WebSocket 连接管理
