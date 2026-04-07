@@ -29,20 +29,12 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 
 [[example]]
-name = "random_symbols"
-
-[[example]]
-name = "history_international"
-
-[[example]]
-name = "history_domestic"
-
-[[example]]
-name = "subscribe_hf_oil"
+name = "new_api"
 
 [dev-dependencies]
 tokio-test = "0.4"
 rand = "0.8"
+tempfile = "3"
 
 [features]
 default = []

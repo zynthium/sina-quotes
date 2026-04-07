@@ -46,19 +46,19 @@ fn parse_international_quote(text: &str) -> Result<Quote> {
     
     let symbol = fields.first().unwrap_or(&"unknown").to_string();
     let idx_price = if fields.get(1).map(|s| s.is_empty()).unwrap_or(true) { 8 } else { 1 };
-    let price = fields.get(idx_price).unwrap_or(&"0").to_string();
-    let volume = fields.get(9).unwrap_or(&"0").to_string();
+    let price: f64 = fields.get(idx_price).unwrap_or(&"0").parse().unwrap_or(0.0);
+    let volume: f64 = fields.get(9).unwrap_or(&"0").parse().unwrap_or(0.0);
     
     Ok(Quote {
         symbol,
         price,
-        bid_price: String::new(),
-        ask_price: String::new(),
-        open: String::new(),
-        high: String::new(),
-        low: String::new(),
-        prev_settle: String::new(),
-        settle_price: String::new(),
+        bid_price: 0.0,
+        ask_price: 0.0,
+        open: 0.0,
+        high: 0.0,
+        low: 0.0,
+        prev_settle: 0.0,
+        settle_price: 0.0,
         volume,
         quote_time: String::new(),
         date: String::new(),

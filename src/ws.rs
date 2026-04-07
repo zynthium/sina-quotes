@@ -46,7 +46,6 @@ fn build_ws_url(codes: &[&str]) -> String {
     format!("ws://w.sinajs.cn/wskt?list={}", joined)
 }
 
-#[allow(dead_code)]
 fn build_international_ws_url(codes: &[&str]) -> String {
     let prefixed: Vec<String> = codes.iter().map(|c| {
         if c.starts_with("hf_") {
@@ -97,7 +96,7 @@ pub async fn subscribe(
     let stream = tokio::net::TcpStream::connect(&addr).await
         .map_err(|e| Error::Connect(e.to_string()))?;
 
-let req = Request::builder()
+    let req = Request::builder()
          .method(Method::GET)
          .uri(&path_with_query)
          .header("Host", "w.sinajs.cn")
@@ -169,7 +168,7 @@ pub async fn subscribe_international(
     };
     let addr = format!("{}:{}", host, port);
 
-let connect_timeout = tokio::time::timeout(
+    let connect_timeout = tokio::time::timeout(
          std::time::Duration::from_secs(5),
          tokio::net::TcpStream::connect(&addr),
      )
@@ -177,7 +176,7 @@ let connect_timeout = tokio::time::timeout(
      .map_err(|_| Error::Connect("connection timeout".to_string()))?
      .map_err(|e| Error::Connect(e.to_string()))?;
 
-let req = Request::builder()
+    let req = Request::builder()
          .method(Method::GET)
          .uri(&path_with_query)
          .header("Host", "w.sinajs.cn")
@@ -226,7 +225,6 @@ let req = Request::builder()
     Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
 }
 
-#[allow(clippy::result_large_err)]
 fn parse_quote(text: &str) -> std::result::Result<Quote, Error> {
     let parts: Vec<&str> = text.split('=').collect();
     if parts.len() < 2 {
@@ -243,15 +241,15 @@ fn parse_quote(text: &str) -> std::result::Result<Quote, Error> {
 
     Ok(Quote {
         symbol,
-        price: fields[0].to_string(),
-        bid_price: String::new(),
-        ask_price: String::new(),
-        open: String::new(),
-        high: String::new(),
-        low: String::new(),
-        prev_settle: String::new(),
-        settle_price: String::new(),
-        volume: fields[2].to_string(),
+        price: fields[0].parse().unwrap_or(0.0),
+        bid_price: 0.0,
+        ask_price: 0.0,
+        open: 0.0,
+        high: 0.0,
+        low: 0.0,
+        prev_settle: 0.0,
+        settle_price: 0.0,
+        volume: fields[2].parse().unwrap_or(0.0),
         quote_time: String::new(),
         date: String::new(),
         name: String::new(),
@@ -281,7 +279,11 @@ fn parse_international_quote(text: &str) -> std::result::Result<Quote, Error> {
         return Err(Error::Parse(format!("insufficient fields: {}", fields.len())));
     }
     
-    let get = |i: usize| -> String {
+    let get = |i: usize| -> f64 {
+        fields.get(i).and_then(|s| s.parse().ok()).unwrap_or(0.0)
+    };
+    
+    let get_str = |i: usize| -> String {
         fields.get(i).map(|s| s.to_string()).unwrap_or_default()
     };
     
@@ -290,14 +292,13 @@ fn parse_international_quote(text: &str) -> std::result::Result<Quote, Error> {
     let ask_price = get(3);
     let high = get(4);
     let low = get(5);
-    let quote_time = get(6);
+    let quote_time = get_str(6);
     let prev_settle = get(7);
     let open = get(8);
     let volume = get(14);
-    let date = get(12);
-    let name = get(13);
+    let date = get_str(12);
+    let name = get_str(13);
     let symbol = fields.first().unwrap_or(&"unknown").to_string();
-    let settle_price = String::new();
     
     tracing::debug!("parsed: {} price={} bid={} ask={} vol={}", symbol, price, bid_price, ask_price, volume);
     
@@ -310,7 +311,7 @@ fn parse_international_quote(text: &str) -> std::result::Result<Quote, Error> {
         high,
         low,
         prev_settle,
-        settle_price,
+        settle_price: 0.0,
         volume,
         quote_time,
         date,
@@ -360,8 +361,8 @@ mod tests {
         assert!(result.is_ok());
         let quote = result.unwrap();
         assert_eq!(quote.symbol, "sh510050");
-        assert_eq!(quote.price, "2.930");
-        assert_eq!(quote.volume, "123456789");
+        assert_eq!(quote.price, 2.930);
+        assert_eq!(quote.volume, 123456789.0);
     }
 
     #[test]

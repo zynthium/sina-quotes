@@ -1,4 +1,4 @@
-use crate::types::Bar;
+use crate::types::KlineBar;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -11,15 +11,11 @@ pub enum Error {
     Empty,
 }
 
-fn is_international(symbol: &str) -> bool {
-    symbol.starts_with("hf_") || symbol.starts_with("hf")
-}
-
 pub async fn fetch_history(
     symbol: &str,
     period: u32,
     max_attempts: usize,
-) -> Result<Vec<Bar>, Error> {
+) -> Result<Vec<KlineBar>, Error> {
     fetch_international_history(symbol, period, max_attempts).await
 }
 
@@ -27,9 +23,9 @@ async fn fetch_international_history(
     symbol: &str,
     period: u32,
     max_attempts: usize,
-) -> Result<Vec<Bar>, Error> {
-    let code = if symbol.starts_with("hf_") {
-        symbol[3..].to_string()
+) -> Result<Vec<KlineBar>, Error> {
+    let code = if let Some(stripped) = symbol.strip_prefix("hf_") {
+        stripped.to_string()
     } else {
         symbol.to_uppercase()
     };
@@ -79,18 +75,22 @@ async fn fetch_international_history(
             continue;
         }
 
-        let bars: Vec<Bar> = data
+        let bars: Vec<KlineBar> = data
             .iter()
-            .filter_map(|v| {
+            .enumerate()
+            .filter_map(|(i, v)| {
                 let obj = v.as_object()?;
-                Some(Bar {
-                    time: obj.get("d")?.as_str()?.to_string(),
+                let time_str = obj.get("d")?.as_str()?;
+                let datetime = parse_datetime(time_str);
+                Some(KlineBar {
+                    id: (i + 1) as i64,
+                    datetime,
                     open: obj.get("o")?.as_str()?.parse().ok()?,
                     high: obj.get("h")?.as_str()?.parse().ok()?,
                     low: obj.get("l")?.as_str()?.parse().ok()?,
                     close: obj.get("c")?.as_str()?.parse().ok()?,
                     volume: obj.get("v")?.as_str()?.parse().ok()?,
-                    open_interest: obj.get("p")?.as_str()?.parse().ok()?,
+                    open_interest: obj.get("p")?.as_str().unwrap_or("0").parse().ok()?,
                 })
             })
             .collect();
@@ -104,6 +104,29 @@ async fn fetch_international_history(
     }
 
     Err(Error::Empty)
+}
+
+fn parse_datetime(time_str: &str) -> i64 {
+    use chrono::{NaiveDateTime, TimeZone, Utc};
+    
+    let formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+    ];
+    
+    for fmt in &formats {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(time_str, fmt) {
+            return Utc.from_utc_datetime(&dt).timestamp_nanos_opt().unwrap_or(0);
+        }
+    }
+    
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(time_str) {
+        return dt.timestamp_nanos_opt().unwrap_or(0);
+    }
+    
+    0
 }
 
 fn extract_json_array(text: &str) -> Result<&str, Error> {

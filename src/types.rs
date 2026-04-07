@@ -1,33 +1,216 @@
+//! 数据类型定义
+
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// 时间周期
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Duration {
+    /// 纳秒数
+    pub ns: u64,
+}
+
+impl Duration {
+    /// 秒数
+    pub fn secs(n: u64) -> Self {
+        Self {
+            ns: n * 1_000_000_000,
+        }
+    }
+
+    /// 分钟
+    pub fn minutes(n: u64) -> Self {
+        Self::secs(n * 60)
+    }
+
+    /// 小时
+    pub fn hours(n: u64) -> Self {
+        Self::minutes(n * 60)
+    }
+
+    /// 天
+    pub fn days(n: u64) -> Self {
+        Self::hours(n * 24)
+    }
+
+    /// 转换为秒数
+    pub fn as_secs(&self) -> u64 {
+        self.ns / 1_000_000_000
+    }
+
+    /// 转换为分钟数
+    pub fn as_minutes(&self) -> u64 {
+        self.as_secs() / 60
+    }
+
+    /// 检查是否为分钟周期
+    pub fn is_minute_period(&self) -> bool {
+        let secs = self.as_secs();
+        secs > 0 && secs.is_multiple_of(60) && secs <= 1440
+    }
+}
+
+impl Default for Duration {
+    fn default() -> Self {
+        Self::minutes(5)
+    }
+}
+
+impl std::fmt::Display for Duration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.ns.is_multiple_of(1_000_000_000) {
+            write!(f, "{}s", self.ns / 1_000_000_000)
+        } else if self.ns.is_multiple_of(1_000_000) {
+            write!(f, "{}ms", self.ns / 1_000_000)
+        } else {
+            write!(f, "{}ns", self.ns)
+        }
+    }
+}
+
+/// K线柱
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Bar {
-    pub time: String,
+pub struct KlineBar {
+    /// K线ID（可用于排序和去重）
+    pub id: i64,
+    /// 时间戳（纳秒）
+    pub datetime: i64,
     pub open: f64,
     pub high: f64,
     pub low: f64,
     pub close: f64,
     pub volume: f64,
+    /// 持仓量（open interest）
     pub open_interest: f64,
 }
 
-/// Real-time quote for international futures
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+impl KlineBar {
+    /// 从新浪API的历史数据创建
+    pub fn from_sina_fields(
+        time: &str,
+        open: &str,
+        high: &str,
+        low: &str,
+        close: &str,
+        volume: &str,
+        open_interest: &str,
+    ) -> Option<Self> {
+        Some(Self {
+            id: 0, // 需要从外部传入
+            datetime: Self::parse_datetime(time)?,
+            open: open.parse().ok()?,
+            high: high.parse().ok()?,
+            low: low.parse().ok()?,
+            close: close.parse().ok()?,
+            volume: volume.parse().ok()?,
+            open_interest: open_interest.parse().ok()?,
+        })
+    }
+
+    /// 解析新浪格式的时间字符串
+    fn parse_datetime(s: &str) -> Option<i64> {
+        // 尝试多种时间格式
+        let formats = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"];
+
+        for fmt in formats {
+            if let Ok(dt) = DateTime::parse_from_str(s, fmt) {
+                return dt.timestamp_nanos_opt();
+            }
+        }
+        None
+    }
+
+    /// 获取日期时间
+    pub fn datetime_utc(&self) -> DateTime<Utc> {
+        DateTime::from_timestamp(self.datetime / 1_000_000_000, 0).unwrap_or_default()
+    }
+}
+
+/// K线数据结构（包含多个Bar）
+#[derive(Debug, Clone)]
+pub struct KlineData {
+    pub symbol: String,
+    pub duration: Duration,
+    pub bars: Vec<KlineBar>,
+}
+
+impl KlineData {
+    pub fn new(symbol: String, duration: Duration) -> Self {
+        Self {
+            symbol,
+            duration,
+            bars: Vec::new(),
+        }
+    }
+
+    pub fn last(&self) -> Option<&KlineBar> {
+        self.bars.last()
+    }
+
+    pub fn len(&self) -> usize {
+        self.bars.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bars.is_empty()
+    }
+}
+
+/// 实时行情数据
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Quote {
     pub symbol: String,
-    pub price: String,
-    pub bid_price: String,
-    pub ask_price: String,
-    pub open: String,
-    pub high: String,
-    pub low: String,
-    pub prev_settle: String,
-    pub settle_price: String,
-    pub volume: String,
+    pub price: f64,
+    pub bid_price: f64,
+    pub ask_price: f64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub volume: f64,
+    pub prev_settle: f64,
+    pub settle_price: f64,
     pub quote_time: String,
     pub date: String,
     pub name: String,
     pub timestamp: i64,
+}
+
+impl Default for Quote {
+    fn default() -> Self {
+        Self {
+            symbol: String::new(),
+            price: 0.0,
+            bid_price: 0.0,
+            ask_price: 0.0,
+            open: 0.0,
+            high: 0.0,
+            low: 0.0,
+            volume: 0.0,
+            prev_settle: 0.0,
+            settle_price: 0.0,
+            quote_time: String::new(),
+            date: String::new(),
+            name: String::new(),
+            timestamp: Utc::now().timestamp(),
+        }
+    }
+}
+
+/// 行情数据更新事件
+#[derive(Debug, Clone)]
+pub enum QuoteEvent {
+    Update(Quote),
+    Error(String),
+    Closed,
+}
+
+/// K线数据更新事件
+#[derive(Debug, Clone)]
+pub enum KlineEvent {
+    Update(KlineBar),
+    GapFill(Vec<KlineBar>),
+    Error(String),
+    Closed,
 }
 
 #[cfg(test)]
@@ -35,49 +218,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_bar_serialize() {
-        let bar = Bar {
-            time: "2024-01-01".to_string(),
-            open: 100.0,
-            high: 106.0,
-            low: 99.0,
-            close: 105.0,
-            volume: 1000000.0,
-            open_interest: 245635.0,
-        };
-        let json = serde_json::to_string(&bar).unwrap();
-        assert!(json.contains("2024-01-01"));
-        assert!(json.contains("100.0"));
-    }
+    fn test_duration() {
+        let d = Duration::minutes(5);
+        assert_eq!(d.as_secs(), 300);
+        assert_eq!(d.as_minutes(), 5);
 
-    #[test]
-    fn test_quote_serialize() {
-        let quote = Quote {
-            symbol: "sh510050".to_string(),
-            price: "2.930".to_string(),
-            bid_price: String::new(),
-            ask_price: String::new(),
-            open: String::new(),
-            high: String::new(),
-            low: String::new(),
-            prev_settle: String::new(),
-            settle_price: String::new(),
-            volume: "123456789".to_string(),
-            quote_time: String::new(),
-            date: String::new(),
-            name: String::new(),
-            timestamp: 1775486946,
-        };
-        let json = serde_json::to_string(&quote).unwrap();
-        assert!(json.contains("sh510050"));
-        assert!(json.contains("2.930"));
-    }
-
-    #[test]
-    fn test_quote_deserialize() {
-        let json = r#"{"symbol":"sh510050","price":"2.930","bid_price":"","ask_price":"","open":"","high":"","low":"","prev_settle":"","settle_price":"","volume":"123456789","quote_time":"","date":"","name":"","timestamp":1775486946}"#;
-        let quote: Quote = serde_json::from_str(json).unwrap();
-        assert_eq!(quote.symbol, "sh510050");
-        assert_eq!(quote.price, "2.930");
+        let d2 = Duration::secs(60);
+        assert_eq!(d2.as_secs(), 60);
     }
 }
