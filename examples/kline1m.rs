@@ -15,9 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
 
-    client
-        .start_websocket(vec![symbol.clone()])
-        .await?;
+    client.start_websocket(vec![symbol.clone()]).await?;
 
     let mut sub = client
         .subscribe_realtime_kline(&symbol, Duration::minutes(1), 300)
@@ -38,4 +36,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.close().await;
     Ok(())
 }
-

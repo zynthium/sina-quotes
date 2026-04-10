@@ -16,9 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let mut quote_stream = client.subscribe_quote(&symbol).await?;
-    client
-        .start_websocket(vec![symbol.clone()])
-        .await?;
+    client.start_websocket(vec![symbol.clone()]).await?;
 
     for i in 0..20 {
         quote_stream.changed().await?;
@@ -29,4 +27,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.close().await;
     Ok(())
 }
-

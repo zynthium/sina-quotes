@@ -46,7 +46,7 @@ impl Duration {
     /// 检查是否为分钟周期
     pub fn is_minute_period(&self) -> bool {
         let secs = self.as_secs();
-        secs > 0 && secs.is_multiple_of(60) && secs <= 1440
+        secs > 0 && secs.is_multiple_of(60) && secs < 86_400
     }
 }
 

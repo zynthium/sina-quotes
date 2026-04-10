@@ -20,9 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let mut streams = client.subscribe_quotes(&symbol_refs).await?;
-    client
-        .start_websocket(symbols.clone())
-        .await?;
+    client.start_websocket(symbols.clone()).await?;
 
     let mut handles = Vec::new();
     for mut s in streams.drain(..) {
@@ -48,4 +46,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.close().await;
     Ok(())
 }
-

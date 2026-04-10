@@ -20,10 +20,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("last_id={}", series.last_id());
 
     if let Some(stats) = client.cache_stats() {
-        println!("cache entries={} total_bars={}", stats.total_entries, stats.total_bars);
+        println!(
+            "cache entries={} total_bars={}",
+            stats.total_entries, stats.total_bars
+        );
     }
 
     client.close().await;
     Ok(())
 }
-

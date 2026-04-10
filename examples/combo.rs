@@ -16,9 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let mut quote_stream = client.subscribe_quote(&symbol).await?;
-    client
-        .start_websocket(vec![symbol.clone()])
-        .await?;
+    client.start_websocket(vec![symbol.clone()]).await?;
 
     let mut kline_sub = client
         .subscribe_realtime_kline(&symbol, Duration::minutes(1), 300)
@@ -44,10 +42,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 k_count += 1;
             }
         }
-        if q_count >= 50 && k_count >= 50 { break; }
+        if q_count >= 50 && k_count >= 50 {
+            break;
+        }
     }
 
     client.close().await;
     Ok(())
 }
-

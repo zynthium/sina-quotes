@@ -436,8 +436,8 @@ impl SinaQuotes {
         }
 
         // 2. 从网络获取
-        let period = duration.as_secs() as u32 / 60;
-        let bars = history::fetch_history(symbol, period, 3)
+        let duration_seconds = duration.as_secs() as u32;
+        let bars = history::fetch_history(symbol, duration_seconds, 3)
             .await
             .map_err(|e| match e {
                 history::Error::Request(e) => SdkError::Http(e),
@@ -487,11 +487,10 @@ impl SinaQuotes {
         tracing::info!("预热缓存: {} 需要下载 {} 段", symbol, missing.len());
 
         // 下载每段数据
-        for (start, end) in missing {
-            let count = (end - start) as usize;
-            let period = duration.as_secs() as u32 / 60;
+        for (start, _end) in missing {
+            let duration_seconds = duration.as_secs() as u32;
 
-            match history::fetch_history(symbol, period, count).await {
+            match history::fetch_history(symbol, duration_seconds, 3).await {
                 Ok(mut bars) => {
                     for bar in &mut bars {
                         bar.id = start + bar.id - 1;
