@@ -5,8 +5,8 @@
 
 use std::sync::{Arc, RwLock};
 
-use crate::buffer::KlineRingBuffer;
-use crate::types::{Duration, KlineBar, KlineData};
+use crate::data::buffer::KlineRingBuffer;
+use crate::data::types::{Duration, KlineBar, KlineData};
 
 /// K线序列句柄
 ///
@@ -63,16 +63,6 @@ impl KlineSeries {
     pub fn read_all(&self) -> Vec<KlineBar> {
         let inner = self.inner.read().unwrap();
         inner.buffer.data().into_iter().cloned().collect()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn as_slice(&self) -> std::sync::RwLockReadGuard<'_, KlineSeriesInner> {
-        self.inner.read().unwrap()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn as_mut_slice(&self) -> std::sync::RwLockWriteGuard<'_, KlineSeriesInner> {
-        self.inner.write().unwrap()
     }
 
     /// 获取最后一个完整的 K线

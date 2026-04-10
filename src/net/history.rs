@@ -1,4 +1,4 @@
-use crate::types::KlineBar;
+use crate::data::types::KlineBar;
 use thiserror::Error;
 
 #[derive(Error, Debug)]

@@ -6,14 +6,14 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::types::{Duration, KlineBar};
-use crate::rangeset::{RangeSet, Range};
+use crate::data::types::{Duration, KlineBar};
+use crate::storage::rangeset::{RangeSet, Range};
 
 /// 缓存键
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -71,9 +71,6 @@ pub struct HistoryCache {
     cache_dir: PathBuf,
     /// 内存中的索引
     index: RwLock<CacheIndex>,
-    /// 数据文件句柄缓存
-    #[allow(dead_code)]
-    handles: RwLock<HashMap<String, Arc<RwLock<File>>>>,
 }
 
 impl HistoryCache {
@@ -97,7 +94,6 @@ impl HistoryCache {
         Ok(Self {
             cache_dir,
             index: RwLock::new(index),
-            handles: RwLock::new(HashMap::new()),
         })
     }
     
@@ -214,7 +210,7 @@ impl HistoryCache {
         
         let need = RangeSet::from_ranges(vec![(start_id, end_id)]);
         
-        crate::rangeset::rangeset_difference(&have, &need)
+        crate::storage::rangeset::rangeset_difference(&have, &need)
     }
     
     /// 获取已缓存的范围

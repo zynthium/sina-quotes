@@ -44,7 +44,6 @@ pub const ALL_SYMBOLS: &[(&str, &str)] = &[
 
 /// 按类别分组的外盘期货品种
 pub mod categories {
-    //! 外盘期货品种按类别分组
 
     /// 能源期货
     pub const ENERGY: &[(&str, &str)] = &[

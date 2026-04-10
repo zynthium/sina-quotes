@@ -37,31 +37,25 @@
 
 // ===================== 模块 =====================
 
-pub mod buffer;       // 环形缓冲区
-pub mod cache;        // 历史数据缓存
+pub mod data;         // 数据层：类型、缓冲区、K线序列
+pub mod net;          // 网络层：WebSocket、历史数据
+pub mod storage;      // 存储层：缓存、范围集合
 pub mod client;       // 客户端入口
 pub mod error;        // 错误类型
-pub mod history;      // 历史数据获取
-pub mod poll;         // HTTP 轮询
-pub mod rangeset;     // RangeSet 数据结构
-pub mod series;       // K 线序列
 pub mod stream;       // 实时行情流
 pub mod symbols;      // 外盘期货品种符号
-pub mod types;        // 数据类型
-pub mod ws;           // WebSocket 订阅
-pub mod ws_service;   // WebSocket 连接管理
 
 // ===================== 重新导出 =====================
 
 // 核心类型
 pub use client::{ClientConfig, ClientBuilder, SinaQuotes};
 pub use error::{SdkError, Result};
-pub use series::KlineSeries;
+pub use data::series::KlineSeries;
 pub use stream::QuoteStream;
-pub use types::{Duration, KlineBar, KlineData, Quote};
-pub use buffer::{RingBuffer, KlineRingBuffer};
-pub use cache::{HistoryCache, CacheKey, CacheStats, CacheEntryMeta};
-pub use rangeset::{RangeSet, Range, rangeset_difference, rangeset_union};
+pub use data::types::{Duration, KlineBar, KlineData, Quote};
+pub use data::buffer::{RingBuffer, KlineRingBuffer};
+pub use storage::cache::{HistoryCache, CacheKey, CacheStats, CacheEntryMeta};
+pub use storage::rangeset::{RangeSet, Range, rangeset_difference, rangeset_union};
 
 // ===================== 版本信息 =====================
 

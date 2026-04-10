@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
-use crate::types::Quote;
+use crate::data::types::Quote;
 
 /// 实时行情流
 /// 
@@ -158,20 +158,6 @@ impl Clone for QuoteManager {
         Self {
             streams: Arc::clone(&self.streams),
         }
-    }
-}
-
-// ===================== Stream 实现 =====================
-
-use futures_util::Stream;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-
-impl Stream for QuoteStream {
-    type Item = Quote;
-    
-    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Pending
     }
 }
 

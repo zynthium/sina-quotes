@@ -12,13 +12,13 @@ use std::time::Duration as StdDuration;
 
 use tokio::sync::{watch, RwLock};
 
-use crate::cache::HistoryCache;
+use crate::storage::cache::HistoryCache;
 use crate::error::{Result, SdkError};
-use crate::history;
-use crate::series::KlineSeries;
+use crate::net::history;
+use crate::data::series::KlineSeries;
 use crate::stream::{QuoteManager, QuoteStream};
-use crate::types::{Duration, KlineBar, Quote};
-use crate::ws_service::WsConnection;
+use crate::data::types::{Duration, KlineBar, Quote};
+use crate::net::ws_service::WsConnection;
 
 /// 客户端配置
 #[derive(Debug, Clone)]
@@ -275,7 +275,7 @@ impl SinaQuotes {
     ) -> Result<Vec<KlineBar>> {
         // 1. 尝试从缓存读取
         if let Some(cache) = &self.cache {
-            let cache_key = crate::cache::CacheKey::new(symbol, duration);
+            let cache_key = crate::storage::cache::CacheKey::new(symbol, duration);
             let cached = cache.get(&cache_key, 0, count as i64);
             
             if cached.len() >= count {
@@ -296,7 +296,7 @@ impl SinaQuotes {
         
         // 3. 存入缓存
         if let Some(cache) = &self.cache {
-            let cache_key = crate::cache::CacheKey::new(symbol, duration);
+            let cache_key = crate::storage::cache::CacheKey::new(symbol, duration);
             // 需要转换回可序列化的格式
             let cache_bars: Vec<KlineBar> = bars.to_vec();
             if let Err(e) = cache.put(&cache_key, &cache_bars) {
@@ -323,7 +323,7 @@ impl SinaQuotes {
             return Ok(());
         };
         
-        let cache_key = crate::cache::CacheKey::new(symbol, duration);
+        let cache_key = crate::storage::cache::CacheKey::new(symbol, duration);
         
         // 获取缺失的范围
         let missing = cache.missing_ranges(&cache_key, start_id, end_id);
@@ -377,7 +377,7 @@ impl SinaQuotes {
     // ===================== 缓存管理 =====================
     
     /// 获取缓存统计
-    pub fn cache_stats(&self) -> Option<crate::cache::CacheStats> {
+    pub fn cache_stats(&self) -> Option<crate::storage::cache::CacheStats> {
         self.cache.as_ref().map(|c| c.stats())
     }
     
@@ -459,7 +459,7 @@ impl SinaQuotes {
     }
     
     /// 获取 WebSocket 连接状态
-    pub async fn ws_state(&self) -> Option<crate::ws_service::WsState> {
+    pub async fn ws_state(&self) -> Option<crate::net::ws_service::WsState> {
         let ws_conn = self.ws_connection.read().await;
         if let Some(conn) = ws_conn.as_ref() {
             Some(conn.state().await)

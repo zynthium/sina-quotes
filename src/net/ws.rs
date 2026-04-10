@@ -1,4 +1,4 @@
-use crate::types::Quote;
+use crate::data::types::Quote;
 use fastwebsockets::{OpCode, Frame, Payload};
 use fastwebsockets::handshake;
 use hyper::body::Bytes;
@@ -70,10 +70,13 @@ where
     }
 }
 
-pub async fn subscribe(
-    symbols: &[&str],
+/// 连接 WebSocket 并返回接收流
+///
+/// `parse_fn` 负责将原始文本解析为 `Quote`，调用方决定解析策略。
+async fn connect_and_stream(
+    url: String,
+    parse_fn: fn(&str) -> std::result::Result<Quote, Error>,
 ) -> Result<impl futures_util::Stream<Item = std::result::Result<Quote, Error>>> {
-    let url = build_ws_url(symbols);
     tracing::info!("connecting to {}", url);
 
     let url_parsed = Url::parse(&url).map_err(|e| Error::Connect(e.to_string()))?;
@@ -86,31 +89,31 @@ pub async fn subscribe(
     } else {
         format!("{}?{}", path, query)
     };
-    let _host_header = if port == 80 {
-        host.to_string()
-    } else {
-        format!("{}:{}", host, port)
-    };
     let addr = format!("{}:{}", host, port);
 
-    let stream = tokio::net::TcpStream::connect(&addr).await
-        .map_err(|e| Error::Connect(e.to_string()))?;
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(&addr),
+    )
+    .await
+    .map_err(|_| Error::Connect("connection timeout".to_string()))?
+    .map_err(|e| Error::Connect(e.to_string()))?;
 
     let req = Request::builder()
-         .method(Method::GET)
-         .uri(&path_with_query)
-         .header("Host", "w.sinajs.cn")
-         .header(UPGRADE, "websocket")
-         .header(CONNECTION, "upgrade")
-         .header("Sec-WebSocket-Key", fastwebsockets::handshake::generate_key())
-         .header("Sec-WebSocket-Version", "13")
-         .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
-         .header("Origin", "https://gu.sina.cn")
-         .body(http_body_util::Empty::<Bytes>::new())
-         .map_err(|e| Error::Connect(e.to_string()))?;
+        .method(Method::GET)
+        .uri(&path_with_query)
+        .header("Host", "w.sinajs.cn")
+        .header(UPGRADE, "websocket")
+        .header(CONNECTION, "upgrade")
+        .header("Sec-WebSocket-Key", fastwebsockets::handshake::generate_key())
+        .header("Sec-WebSocket-Version", "13")
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+        .header("Origin", "https://gu.sina.cn")
+        .body(http_body_util::Empty::<Bytes>::new())
+        .map_err(|e| Error::Connect(e.to_string()))?;
 
     let (ws, _) = handshake::client(&TokioExecutor, req, stream).await
-        .map_err(|_| Error::Connect("connection failed".to_string()))?;
+        .map_err(|e| Error::Connect(e.to_string()))?;
 
     let mut ws = ws;
 
@@ -126,7 +129,7 @@ pub async fn subscribe(
                     let opcode = frame.opcode;
                     if opcode == OpCode::Text || opcode == OpCode::Binary {
                         if let Ok(text) = String::from_utf8(frame.payload.to_vec())
-                            && let Ok(quote) = parse_quote(&text)
+                            && let Ok(quote) = parse_fn(&text)
                         {
                             let _ = tx.send(Ok(quote)).await;
                         }
@@ -145,84 +148,16 @@ pub async fn subscribe(
     Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
 }
 
+pub async fn subscribe(
+    symbols: &[&str],
+) -> Result<impl futures_util::Stream<Item = std::result::Result<Quote, Error>> + use<>> {
+    connect_and_stream(build_ws_url(symbols), parse_quote).await
+}
+
 pub async fn subscribe_international(
     symbols: &[&str],
-) -> Result<impl futures_util::Stream<Item = std::result::Result<Quote, Error>>> {
-    let url = build_international_ws_url(symbols);
-    tracing::info!("connecting to {}", url);
-
-    let url_parsed = Url::parse(&url).map_err(|e| Error::Connect(e.to_string()))?;
-    let host = url_parsed.host_str().ok_or_else(|| Error::Connect("no host".to_string()))?;
-    let port = url_parsed.port().unwrap_or(80);
-    let path = url_parsed.path();
-    let query = url_parsed.query().unwrap_or("");
-    let path_with_query = if query.is_empty() {
-        path.to_string()
-    } else {
-        format!("{}?{}", path, query)
-    };
-    let _host_header = if port == 80 {
-        host.to_string()
-    } else {
-        format!("{}:{}", host, port)
-    };
-    let addr = format!("{}:{}", host, port);
-
-    let connect_timeout = tokio::time::timeout(
-         std::time::Duration::from_secs(5),
-         tokio::net::TcpStream::connect(&addr),
-     )
-     .await
-     .map_err(|_| Error::Connect("connection timeout".to_string()))?
-     .map_err(|e| Error::Connect(e.to_string()))?;
-
-    let req = Request::builder()
-         .method(Method::GET)
-         .uri(&path_with_query)
-         .header("Host", "w.sinajs.cn")
-         .header(UPGRADE, "websocket")
-         .header(CONNECTION, "upgrade")
-         .header("Sec-WebSocket-Key", fastwebsockets::handshake::generate_key())
-         .header("Sec-WebSocket-Version", "13")
-         .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
-         .header("Origin", "https://gu.sina.cn")
-         .body(http_body_util::Empty::<Bytes>::new())
-         .map_err(|e| Error::Connect(e.to_string()))?;
-
-    let (ws, _) = handshake::client(&TokioExecutor, req, connect_timeout).await
-        .map_err(|e| Error::Connect(e.to_string()))?;
-
-    let mut ws = ws;
-
-    ws.write_frame(Frame::new(true, OpCode::Text, None, Payload::Borrowed(b" "))).await
-        .map_err(|e| Error::WebSocket(e.to_string()))?;
-
-    let (tx, rx) = tokio::sync::mpsc::channel(100);
-
-    tokio::spawn(async move {
-        loop {
-            match ws.read_frame().await {
-                Ok(frame) => {
-                    let opcode = frame.opcode;
-                    if opcode == OpCode::Text || opcode == OpCode::Binary {
-                        if let Ok(text) = String::from_utf8(frame.payload.to_vec())
-                            && let Ok(quote) = parse_international_quote(&text)
-                        {
-                            let _ = tx.send(Ok(quote)).await;
-                        }
-                    } else if opcode == OpCode::Close {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(Error::WebSocket(e.to_string()))).await;
-                    break;
-                }
-            }
-        }
-    });
-
-    Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
+) -> Result<impl futures_util::Stream<Item = std::result::Result<Quote, Error>> + use<>> {
+    connect_and_stream(build_international_ws_url(symbols), parse_international_quote).await
 }
 
 fn parse_quote(text: &str) -> std::result::Result<Quote, Error> {
@@ -262,31 +197,31 @@ fn parse_international_quote(text: &str) -> std::result::Result<Quote, Error> {
     if start_eq.is_none() {
         return Err(Error::Parse("no = pattern".to_string()));
     }
-    
+
     let start = start_eq.unwrap() + 1;
     let data = if text[start..].starts_with('"') {
         text[start+1..].trim_end_matches('"').trim_end_matches(';')
     } else {
         text[start..].trim_end_matches(';').trim_end_matches(',')
     };
-    
+
     if data.is_empty() {
         return Err(Error::ChannelClosed);
     }
-    
+
     let fields: Vec<&str> = data.split(',').collect();
     if fields.len() < 10 {
         return Err(Error::Parse(format!("insufficient fields: {}", fields.len())));
     }
-    
+
     let get = |i: usize| -> f64 {
         fields.get(i).and_then(|s| s.parse().ok()).unwrap_or(0.0)
     };
-    
+
     let get_str = |i: usize| -> String {
         fields.get(i).map(|s| s.to_string()).unwrap_or_default()
     };
-    
+
     let price = get(0);
     let bid_price = get(2);
     let ask_price = get(3);
@@ -299,9 +234,9 @@ fn parse_international_quote(text: &str) -> std::result::Result<Quote, Error> {
     let date = get_str(12);
     let name = get_str(13);
     let symbol = fields.first().unwrap_or(&"unknown").to_string();
-    
+
     tracing::debug!("parsed: {} price={} bid={} ask={} vol={}", symbol, price, bid_price, ask_price, volume);
-    
+
     Ok(Quote {
         symbol,
         price,

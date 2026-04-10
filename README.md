@@ -205,20 +205,23 @@ pub struct Quote {
 
 ```
 src/
-├── lib.rs          # 模块导出
-├── main.rs         # CLI 入口
-├── client.rs       # SinaQuotes 客户端
-├── series.rs       # KlineSeries K 线序列
-├── stream.rs       # QuoteStream 行情流
-├── ws_service.rs   # WebSocket 连接管理
-├── ws.rs           # WebSocket 协议
-├── history.rs      # 历史数据获取
-├── poll.rs         # HTTP 轮询
-├── types.rs        # 数据类型
-├── buffer.rs       # 环形缓冲区
-├── cache.rs        # 缓存管理
-├── rangeset.rs     # RangeSet
-└── error.rs        # 错误定义
+├── lib.rs              # 模块导出
+├── main.rs             # CLI 入口
+├── client.rs           # SinaQuotes 客户端
+├── stream.rs           # QuoteStream 行情流
+├── symbols.rs          # 外盘期货品种符号
+├── error.rs            # 错误定义
+├── data/               # 数据层
+│   ├── types.rs        # KlineBar, Quote, Duration
+│   ├── buffer.rs       # 环形缓冲区
+│   └── series.rs       # KlineSeries K 线序列
+├── net/                # 网络层
+│   ├── ws.rs           # WebSocket 协议
+│   ├── ws_service.rs   # WebSocket 连接管理
+│   └── history.rs      # 历史数据获取
+└── storage/            # 存储层
+    ├── cache.rs        # 缓存管理
+    └── rangeset.rs     # RangeSet
 ```
 
 ## 示例

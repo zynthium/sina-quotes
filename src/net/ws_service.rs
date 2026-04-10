@@ -10,10 +10,7 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 
 use crate::stream::QuoteManager;
-use crate::ws;
-
-#[allow(unused_imports)]
-use ws::Error as WsError;
+use crate::net::ws;
 
 /// WebSocket 连接状态
 #[derive(Debug, Clone)]

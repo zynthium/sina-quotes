@@ -1,6 +1,6 @@
 //! 环形缓冲区 - 用于 K 线数据存储
 
-use crate::types::KlineBar;
+use crate::data::types::KlineBar;
 use std::collections::VecDeque;
 
 /// 固定容量的环形缓冲区
@@ -233,7 +233,7 @@ impl Default for KlineRingBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::KlineBar;
+    use crate::data::types::KlineBar;
 
     fn make_bar(id: i64, close: f64) -> KlineBar {
         KlineBar {
