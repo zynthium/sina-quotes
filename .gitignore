@@ -14,3 +14,4 @@ Cargo.lock
 
 # Crates.io registry index (optional, depending on workflow)
 .cargo/
+cache/

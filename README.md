@@ -226,7 +226,7 @@ src/
 
 ## 示例
 
-### 完整示例
+### 1. 仅获取历史 K 线
 
 ```rust
 use std::time::Duration as StdDuration;
@@ -241,7 +241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .default_data_length(100)
         .build()
         .await?;
-    
+
     // 获取 K 线
     let symbol = "hf_OIL";
     let series = client
@@ -251,23 +251,152 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Symbol: {}", series.symbol());
     println!("Duration: {}", series.duration());
     println!("Bars: {} / {}", series.len(), series.capacity());
-    
-    // 订阅实时行情
-    let _stream = client.subscribe_quote(symbol).await?;
-    println!("Subscribed to {}", symbol);
-    
-    // 事件循环
-    for i in 0..5 {
-        tokio::time::sleep(StdDuration::from_secs(2)).await;
-        
-        if let Some(current) = series.current() {
-            println!("[{}] Current: {:.3}", i, current.close);
-        }
-        if let Some(last) = series.last() {
-            println!("[{}] Last: {:.3}", i, last.close);
+
+    Ok(())
+}
+```
+
+### 2. 订阅实时行情（QuoteStream，需要启动 WebSocket）
+
+```rust
+use sina_quotes::{Duration, SinaQuotes};
+use std::time::Duration as StdDuration;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = SinaQuotes::new().await?;
+
+    let symbol = "hf_OIL";
+
+    // 订阅行情流（快照）
+    let mut stream = client.subscribe_quote(symbol).await?;
+
+    // 启动 WebSocket（真正建立到新浪的连接）
+    client
+        .start_websocket(vec![symbol.to_string()])
+        .await?;
+
+    // 等待并打印 10 次更新
+    for i in 0..10 {
+        stream.changed().await?;
+        let quote = stream.get();
+        println!("[{:02}] {} price={:.2}", i, quote.symbol, quote.price);
+    }
+
+    Ok(())
+}
+```
+
+### 3. 订阅实时 1 分钟 K 线（RealtimeKline）
+
+```rust
+use sina_quotes::{Duration, SinaQuotes};
+use std::time::Duration as StdDuration;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = SinaQuotes::new().await?;
+
+    let symbol = "hf_OIL";
+
+    client
+        .start_websocket(vec![symbol.to_string()])
+        .await?;
+
+    let mut sub = client
+        .subscribe_realtime_kline(symbol, Duration::minutes(1), 300)
+        .await?;
+
+    // 事件循环：未完结 / 已完结 bar 都会推送
+    while let Some(ev) = sub.next().await {
+        if ev.is_completed {
+            println!("新完成 1m K 线: id={} close={:.3}", ev.bar.id, ev.bar.close);
+        } else {
+            println!("当前 1m K 线更新: id={} close={:.3}", ev.bar.id, ev.bar.close);
         }
     }
-    
+
+    Ok(())
+}
+```
+
+### 4. 同时消费 Quote 与 RealtimeKline
+
+```rust
+use sina_quotes::{Duration, SinaQuotes};
+use std::time::Duration as StdDuration;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = SinaQuotes::new().await?;
+    let symbol = "hf_OIL";
+
+    let mut quote_stream = client.subscribe_quote(symbol).await?;
+    client
+        .start_websocket(vec![symbol.to_string()])
+        .await?;
+
+    let mut kline_sub = client
+        .subscribe_realtime_kline(symbol, Duration::minutes(1), 300)
+        .await?;
+
+    loop {
+        tokio::select! {
+            res = quote_stream.changed() => {
+                if res.is_err() {
+                    break;
+                }
+                let q = quote_stream.get();
+                println!("[Q] {} price={:.2}", q.symbol, q.price);
+            }
+            ev = kline_sub.next() => {
+                let Some(ev) = ev else { break; };
+                if ev.is_completed {
+                    println!("[K] 完成 bar id={} close={:.3}", ev.bar.id, ev.bar.close);
+                } else {
+                    println!("[K] 更新 bar id={} close={:.3}", ev.bar.id, ev.bar.close);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+```
+
+### 5. 启用本地缓存并复用历史数据
+
+```rust
+use sina_quotes::{Duration, SinaQuotes};
+use std::time::Duration as StdDuration;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 第一次运行：会从服务器拉取历史并写入缓存目录
+    let client = SinaQuotes::builder()
+        .cache_dir("./cache".into())
+        .default_data_length(300)
+        .build()
+        .await?;
+
+    let symbol = "hf_OIL";
+    let duration = Duration::minutes(1);
+
+    let series = client
+        .get_kline_serial(symbol, duration, 300)
+        .await?;
+
+    println!(
+        "第一次：symbol={} len={} last_id={}",
+        series.symbol(),
+        series.len(),
+        series.last_id()
+    );
+
+    if let Some(stats) = client.cache_stats() {
+        println!("缓存条目数={} 总 bars={}", stats.total_entries, stats.total_bars);
+    }
+
     Ok(())
 }
 ```

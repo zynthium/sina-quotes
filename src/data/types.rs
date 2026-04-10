@@ -1,6 +1,6 @@
 //! 数据类型定义
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 use serde::{Deserialize, Serialize};
 
 /// 时间周期
@@ -126,6 +126,23 @@ impl KlineBar {
     }
 }
 
+impl std::fmt::Display for KlineBar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let offset = FixedOffset::east_opt(8 * 3600).unwrap();
+        let dt = self.datetime_utc().with_timezone(&offset);
+        write!(
+            f,
+            "t={} O={:.3} H={:.3} L={:.3} C={:.3} V={:.3}",
+            dt.format("%Y-%m-%d %H:%M:%S"),
+            self.open,
+            self.high,
+            self.low,
+            self.close,
+            self.volume
+        )
+    }
+}
+
 /// K线数据结构（包含多个Bar）
 #[derive(Debug, Clone)]
 pub struct KlineData {
@@ -210,6 +227,33 @@ impl Default for Quote {
     }
 }
 
+impl std::fmt::Display for Quote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let offset = FixedOffset::east_opt(8 * 3600).unwrap();
+        let t = if !self.date.is_empty() && !self.quote_time.is_empty() {
+            format!("{} {}", self.date, self.quote_time)
+        } else {
+            let dt = DateTime::from_timestamp(self.timestamp, 0).unwrap_or_default();
+            dt.with_timezone(&offset)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        };
+        write!(
+            f,
+            "{} t={} P={:.3} B={:.3} A={:.3} O={:.3} H={:.3} L={:.3} V={:.3}",
+            self.symbol,
+            t.trim(),
+            self.price,
+            self.bid_price,
+            self.ask_price,
+            self.open,
+            self.high,
+            self.low,
+            self.volume
+        )
+    }
+}
+
 /// 行情数据更新事件
 #[derive(Debug, Clone)]
 pub enum QuoteEvent {
@@ -239,5 +283,70 @@ mod tests {
 
         let d2 = Duration::secs(60);
         assert_eq!(d2.as_secs(), 60);
+    }
+
+    #[test]
+    fn test_kline_bar_display_one_line() {
+        let bar = KlineBar {
+            id: 1,
+            datetime: 0,
+            open: 1.0,
+            high: 2.0,
+            low: 0.5,
+            close: 1.5,
+            volume: 10.0,
+            open_interest: 0.0,
+        };
+        let s = format!("{}", bar);
+        assert!(!s.contains('\n'));
+        assert!(s.contains("t="));
+        assert!(s.contains("O="));
+        assert!(s.contains("H="));
+        assert!(s.contains("L="));
+        assert!(s.contains("C="));
+        assert!(s.contains("V="));
+        assert!(s.contains("1970-01-01 08:00:00"));
+    }
+
+    #[test]
+    fn test_quote_display_one_line() {
+        let q = Quote {
+            symbol: "hf_TEST".to_string(),
+            price: 95.74,
+            bid_price: 95.7,
+            ask_price: 95.8,
+            open: 90.0,
+            high: 100.0,
+            low: 80.0,
+            volume: 93188.0,
+            prev_settle: 89.0,
+            settle_price: 0.0,
+            quote_time: "10:00:00".to_string(),
+            date: "2026-04-10".to_string(),
+            name: "TEST".to_string(),
+            timestamp: 1,
+        };
+        let s = format!("{}", q);
+        assert!(!s.contains('\n'));
+        assert!(s.contains("hf_TEST"));
+        assert!(s.contains("t="));
+        assert!(s.contains("P="));
+        assert!(s.contains("B="));
+        assert!(s.contains("A="));
+        assert!(s.contains("O="));
+        assert!(s.contains("H="));
+        assert!(s.contains("L="));
+        assert!(s.contains("V="));
+    }
+
+    #[test]
+    fn test_quote_display_fallback_uses_shanghai_time() {
+        let q = Quote {
+            symbol: "hf_TEST".to_string(),
+            timestamp: 0,
+            ..Default::default()
+        };
+        let s = format!("{}", q);
+        assert!(s.contains("1970-01-01 08:00:00"));
     }
 }

@@ -14,6 +14,7 @@ pub struct KlineAggregator {
     current_bucket_id: Option<i64>,
     current: Option<KlineBar>,
     last_total_volume: Option<f64>,
+    seeded: bool,
 }
 
 pub struct RealtimeKline {
@@ -48,12 +49,14 @@ impl KlineAggregator {
             current_bucket_id: None,
             current: None,
             last_total_volume: None,
+            seeded: false,
         }
     }
 
     pub fn seed_from_bar(&mut self, bar: KlineBar) {
         self.current_bucket_id = Some(bar.id);
         self.current = Some(bar);
+        self.seeded = true;
     }
 
     pub fn on_quote(&mut self, quote: Quote) -> Vec<KlineEvent> {
@@ -91,6 +94,7 @@ impl KlineAggregator {
             };
             self.current_bucket_id = Some(bucket_id);
             self.current = Some(bar.clone());
+            self.seeded = false;
             return vec![KlineEvent {
                 bar,
                 is_completed: false,
@@ -105,6 +109,7 @@ impl KlineAggregator {
             bar.close = quote.price;
             bar.volume += delta_volume;
             self.current = Some(bar.clone());
+            self.seeded = false;
             return vec![KlineEvent {
                 bar,
                 is_completed: false,
@@ -112,7 +117,9 @@ impl KlineAggregator {
         }
 
         let mut events = Vec::with_capacity(2);
-        if let Some(prev) = self.current.take() {
+        if self.seeded && bucket_id > current_bucket_id + 1 {
+            self.current = None;
+        } else if let Some(prev) = self.current.take() {
             events.push(KlineEvent {
                 bar: prev,
                 is_completed: true,
@@ -132,6 +139,7 @@ impl KlineAggregator {
 
         self.current_bucket_id = Some(bucket_id);
         self.current = Some(bar.clone());
+        self.seeded = false;
         events.push(KlineEvent {
             bar,
             is_completed: false,
@@ -240,5 +248,34 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].bar.open, 5.0);
         assert_eq!(evs[0].bar.close, 7.0);
+    }
+
+    #[test]
+    fn test_seed_discontinuity_does_not_emit_completed() {
+        let dur = Duration::minutes(1);
+        let mut agg = KlineAggregator::new(dur);
+        agg.seed_from_bar(KlineBar {
+            id: 10,
+            datetime: 10 * 60 * 1_000_000_000,
+            open: 1.0,
+            high: 1.0,
+            low: 1.0,
+            close: 1.0,
+            volume: 0.0,
+            open_interest: 0.0,
+        });
+
+        let q = Quote {
+            symbol: "hf_TEST".into(),
+            price: 2.0,
+            volume: 1.0,
+            timestamp: 20 * 60,
+            ..Default::default()
+        };
+
+        let evs = agg.on_quote(q);
+        assert_eq!(evs.len(), 1);
+        assert!(!evs[0].is_completed);
+        assert_eq!(evs[0].bar.id, 20);
     }
 }
