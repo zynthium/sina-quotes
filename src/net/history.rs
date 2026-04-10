@@ -29,7 +29,7 @@ async fn fetch_international_history(
     } else {
         symbol.to_uppercase()
     };
-    
+
     let var_name = format!("_{}_{}_{}", code, period, code.len());
     let url = format!(
         "https://gu.sina.cn/ft/api/jsonp.php/var%20{}%3D/GlobalService.getMink",
@@ -47,11 +47,13 @@ async fn fetch_international_history(
     );
     headers.insert(
         reqwest::header::USER_AGENT,
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36".parse().unwrap(),
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+            .parse()
+            .unwrap(),
     );
 
     let client = reqwest::Client::new();
-    
+
     for attempt in 0..max_attempts {
         let response = client
             .get(&url)
@@ -63,12 +65,14 @@ async fn fetch_international_history(
         let text = response.text().await?;
 
         let raw = extract_json_array(&text)?;
-        
+
         let wrapped = format!("[{}]", raw);
         let value: serde_json::Value = serde_json::from_str(&wrapped)
             .map_err(|e| Error::Parse(format!("JSON decode: {}", e)))?;
-        
-        let data = value.as_array().ok_or_else(|| Error::Parse("not an array".to_string()))?;
+
+        let data = value
+            .as_array()
+            .ok_or_else(|| Error::Parse("not an array".to_string()))?;
 
         if data.is_empty() {
             tracing::warn!("attempt {}: empty data", attempt + 1);
@@ -77,13 +81,14 @@ async fn fetch_international_history(
 
         let bars: Vec<KlineBar> = data
             .iter()
-            .enumerate()
-            .filter_map(|(i, v)| {
+            .filter_map(|v| {
                 let obj = v.as_object()?;
                 let time_str = obj.get("d")?.as_str()?;
                 let datetime = parse_datetime(time_str);
+                let id = compute_bucket_id(datetime, period);
+                let datetime = id * duration_ns(period);
                 Some(KlineBar {
-                    id: (i + 1) as i64,
+                    id,
                     datetime,
                     open: obj.get("o")?.as_str()?.parse().ok()?,
                     high: obj.get("h")?.as_str()?.parse().ok()?,
@@ -108,25 +113,40 @@ async fn fetch_international_history(
 
 fn parse_datetime(time_str: &str) -> i64 {
     use chrono::{NaiveDateTime, TimeZone, Utc};
-    
+
     let formats = [
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
         "%Y/%m/%d %H:%M:%S",
         "%Y/%m/%d %H:%M",
     ];
-    
+
     for fmt in &formats {
         if let Ok(dt) = NaiveDateTime::parse_from_str(time_str, fmt) {
-            return Utc.from_utc_datetime(&dt).timestamp_nanos_opt().unwrap_or(0);
+            return Utc
+                .from_utc_datetime(&dt)
+                .timestamp_nanos_opt()
+                .unwrap_or(0);
         }
     }
-    
+
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(time_str) {
         return dt.timestamp_nanos_opt().unwrap_or(0);
     }
-    
+
     0
+}
+
+fn duration_ns(period: u32) -> i64 {
+    (period as i64) * 60 * 1_000_000_000
+}
+
+fn compute_bucket_id(datetime_ns: i64, period: u32) -> i64 {
+    let d = duration_ns(period);
+    if d <= 0 {
+        return 0;
+    }
+    datetime_ns.div_euclid(d)
 }
 
 fn extract_json_array(text: &str) -> Result<&str, Error> {
@@ -137,7 +157,7 @@ fn extract_json_array(text: &str) -> Result<&str, Error> {
     let array_start = start + 3;
     let mut depth = 1;
     let mut i = array_start;
-    
+
     while i < text.len() {
         match text.as_bytes()[i] {
             b'[' => depth += 1,
@@ -189,5 +209,15 @@ mod tests {
         let text = "var test=([1,2,3);";
         let result = extract_json_array(text);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compute_bucket_id_minute_step() {
+        let period = 1;
+        let dt0 = parse_datetime("2020-01-01 00:00");
+        let dt1 = parse_datetime("2020-01-01 00:01");
+        let id0 = compute_bucket_id(dt0, period);
+        let id1 = compute_bucket_id(dt1, period);
+        assert_eq!(id1 - id0, 1);
     }
 }

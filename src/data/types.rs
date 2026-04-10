@@ -159,19 +159,33 @@ impl KlineData {
 /// 实时行情数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Quote {
+    /// 证券代码
     pub symbol: String,
+    /// 最新价
     pub price: f64,
+    /// 买一价
     pub bid_price: f64,
+    /// 卖一价
     pub ask_price: f64,
+    /// 今日开盘价（注意：非当前 K 线的开盘价，而是当日累计）
     pub open: f64,
+    /// 今日最高价（注意：非当前 K 线的最高价，而是当日累计）
     pub high: f64,
+    /// 今日最低价（注意：非当前 K 线的最低价，而是当日累计）
     pub low: f64,
+    /// 今日累计成交量（注意：非当前 K 线的成交量）
     pub volume: f64,
+    /// 昨收价
     pub prev_settle: f64,
+    /// 结算价
     pub settle_price: f64,
+    /// 行情时间
     pub quote_time: String,
+    /// 行情日期
     pub date: String,
+    /// 证券名称
     pub name: String,
+    /// 本地接收时间戳
     pub timestamp: i64,
 }
 

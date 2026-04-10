@@ -37,25 +37,27 @@
 
 // ===================== 模块 =====================
 
-pub mod data;         // 数据层：类型、缓冲区、K线序列
-pub mod net;          // 网络层：WebSocket、历史数据
-pub mod storage;      // 存储层：缓存、范围集合
-pub mod client;       // 客户端入口
-pub mod error;        // 错误类型
-pub mod stream;       // 实时行情流
-pub mod symbols;      // 外盘期货品种符号
+pub mod client; // 客户端入口
+pub mod data; // 数据层：类型、缓冲区、K线序列
+pub mod error; // 错误类型
+pub mod net; // 网络层：WebSocket、历史数据
+pub mod realtime_kline;
+pub mod storage; // 存储层：缓存、范围集合
+pub mod stream; // 实时行情流
+pub mod symbols; // 外盘期货品种符号
 
 // ===================== 重新导出 =====================
 
 // 核心类型
-pub use client::{ClientConfig, ClientBuilder, SinaQuotes};
-pub use error::{SdkError, Result};
+pub use client::{ClientBuilder, ClientConfig, SinaQuotes};
+pub use data::buffer::{KlineRingBuffer, RingBuffer};
 pub use data::series::KlineSeries;
-pub use stream::QuoteStream;
 pub use data::types::{Duration, KlineBar, KlineData, Quote};
-pub use data::buffer::{RingBuffer, KlineRingBuffer};
-pub use storage::cache::{HistoryCache, CacheKey, CacheStats, CacheEntryMeta};
-pub use storage::rangeset::{RangeSet, Range, rangeset_difference, rangeset_union};
+pub use error::{Result, SdkError};
+pub use realtime_kline::{KlineEvent, RealtimeKline};
+pub use storage::cache::{CacheEntryMeta, CacheKey, CacheStats, HistoryCache};
+pub use storage::rangeset::{Range, RangeSet, rangeset_difference, rangeset_union};
+pub use stream::QuoteStream;
 
 // ===================== 版本信息 =====================
 
@@ -97,7 +99,7 @@ mod tests {
             volume: 1000.0,
             open_interest: 5000.0,
         };
-        
+
         assert_eq!(bar.id, 1);
         assert_eq!(bar.close, 102.0);
     }

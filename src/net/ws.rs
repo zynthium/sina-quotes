@@ -1,13 +1,13 @@
 use crate::data::types::Quote;
-use fastwebsockets::{OpCode, Frame, Payload};
 use fastwebsockets::handshake;
-use hyper::body::Bytes;
-use hyper::Request;
-use thiserror::Error;
-use http::header::{UPGRADE, CONNECTION};
+use fastwebsockets::{Frame, OpCode, Payload};
 use http::Method;
-use url::Url;
+use http::header::{CONNECTION, UPGRADE};
+use hyper::Request;
+use hyper::body::Bytes;
 use std::future::Future;
+use thiserror::Error;
+use url::Url;
 
 #[derive(Error, Debug)]
 #[allow(clippy::result_large_err)]
@@ -47,13 +47,16 @@ fn build_ws_url(codes: &[&str]) -> String {
 }
 
 fn build_international_ws_url(codes: &[&str]) -> String {
-    let prefixed: Vec<String> = codes.iter().map(|c| {
-        if c.starts_with("hf_") {
-            c.to_string()
-        } else {
-            format!("hf_{}", c.to_uppercase())
-        }
-    }).collect();
+    let prefixed: Vec<String> = codes
+        .iter()
+        .map(|c| {
+            if c.starts_with("hf_") {
+                c.to_string()
+            } else {
+                format!("hf_{}", c.to_uppercase())
+            }
+        })
+        .collect();
     let joined = prefixed.join(",");
     format!("ws://w.sinajs.cn/wskt?list={}", joined)
 }
@@ -80,7 +83,9 @@ async fn connect_and_stream(
     tracing::info!("connecting to {}", url);
 
     let url_parsed = Url::parse(&url).map_err(|e| Error::Connect(e.to_string()))?;
-    let host = url_parsed.host_str().ok_or_else(|| Error::Connect("no host".to_string()))?;
+    let host = url_parsed
+        .host_str()
+        .ok_or_else(|| Error::Connect("no host".to_string()))?;
     let port = url_parsed.port().unwrap_or(80);
     let path = url_parsed.path();
     let query = url_parsed.query().unwrap_or("");
@@ -112,26 +117,49 @@ async fn connect_and_stream(
         .body(http_body_util::Empty::<Bytes>::new())
         .map_err(|e| Error::Connect(e.to_string()))?;
 
-    let (ws, _) = handshake::client(&TokioExecutor, req, stream).await
+    let (ws, _) = handshake::client(&TokioExecutor, req, stream)
+        .await
         .map_err(|e| Error::Connect(e.to_string()))?;
 
     let mut ws = ws;
 
-    ws.write_frame(Frame::new(true, OpCode::Text, None, Payload::Borrowed(b" "))).await
-        .map_err(|e| Error::WebSocket(e.to_string()))?;
+    ws.write_frame(Frame::new(
+        true,
+        OpCode::Text,
+        None,
+        Payload::Borrowed(b" "),
+    ))
+    .await
+    .map_err(|e| Error::WebSocket(e.to_string()))?;
 
     let (tx, rx) = tokio::sync::mpsc::channel(100);
 
     tokio::spawn(async move {
+        let dump_raw = std::env::var_os("SINA_QUOTES_DUMP_WS").is_some();
         loop {
             match ws.read_frame().await {
                 Ok(frame) => {
                     let opcode = frame.opcode;
                     if opcode == OpCode::Text || opcode == OpCode::Binary {
-                        if let Ok(text) = String::from_utf8(frame.payload.to_vec())
-                            && let Ok(quote) = parse_fn(&text)
-                        {
-                            let _ = tx.send(Ok(quote)).await;
+                        let bytes = frame.payload.to_vec();
+                        let text = match String::from_utf8(bytes) {
+                            Ok(text) => text,
+                            Err(_) => continue,
+                        };
+
+                        if dump_raw {
+                            println!("[WS RAW] {}", text);
+                        }
+
+                        match parse_fn(&text) {
+                            Ok(quote) => {
+                                let _ = tx.send(Ok(quote)).await;
+                            }
+                            Err(e) => {
+                                if dump_raw {
+                                    println!("[WS RAW] parse error: {}", e);
+                                }
+                            }
                         }
                     } else if opcode == OpCode::Close {
                         break;
@@ -157,7 +185,11 @@ pub async fn subscribe(
 pub async fn subscribe_international(
     symbols: &[&str],
 ) -> Result<impl futures_util::Stream<Item = std::result::Result<Quote, Error>> + use<>> {
-    connect_and_stream(build_international_ws_url(symbols), parse_international_quote).await
+    connect_and_stream(
+        build_international_ws_url(symbols),
+        parse_international_quote,
+    )
+    .await
 }
 
 fn parse_quote(text: &str) -> std::result::Result<Quote, Error> {
@@ -193,16 +225,15 @@ fn parse_quote(text: &str) -> std::result::Result<Quote, Error> {
 }
 
 fn parse_international_quote(text: &str) -> std::result::Result<Quote, Error> {
-    let start_eq = text.find('=');
-    if start_eq.is_none() {
-        return Err(Error::Parse("no = pattern".to_string()));
-    }
+    let (symbol, rhs) = text
+        .split_once('=')
+        .ok_or_else(|| Error::Parse("no = pattern".to_string()))?;
 
-    let start = start_eq.unwrap() + 1;
-    let data = if text[start..].starts_with('"') {
-        text[start+1..].trim_end_matches('"').trim_end_matches(';')
-    } else {
-        text[start..].trim_end_matches(';').trim_end_matches(',')
+    let symbol = symbol.trim().to_string();
+
+    let mut data = rhs.trim().trim_end_matches(';').trim_end_matches(',');
+    if let Some(stripped) = data.strip_prefix('"') {
+        data = stripped.trim_end_matches('"');
     };
 
     if data.is_empty() {
@@ -211,16 +242,15 @@ fn parse_international_quote(text: &str) -> std::result::Result<Quote, Error> {
 
     let fields: Vec<&str> = data.split(',').collect();
     if fields.len() < 10 {
-        return Err(Error::Parse(format!("insufficient fields: {}", fields.len())));
+        return Err(Error::Parse(format!(
+            "insufficient fields: {}",
+            fields.len()
+        )));
     }
 
-    let get = |i: usize| -> f64 {
-        fields.get(i).and_then(|s| s.parse().ok()).unwrap_or(0.0)
-    };
+    let get = |i: usize| -> f64 { fields.get(i).and_then(|s| s.parse().ok()).unwrap_or(0.0) };
 
-    let get_str = |i: usize| -> String {
-        fields.get(i).map(|s| s.to_string()).unwrap_or_default()
-    };
+    let get_str = |i: usize| -> String { fields.get(i).map(|s| s.to_string()).unwrap_or_default() };
 
     let price = get(0);
     let bid_price = get(2);
@@ -233,9 +263,6 @@ fn parse_international_quote(text: &str) -> std::result::Result<Quote, Error> {
     let volume = get(14);
     let date = get_str(12);
     let name = get_str(13);
-    let symbol = fields.first().unwrap_or(&"unknown").to_string();
-
-    tracing::debug!("parsed: {} price={} bid={} ask={} vol={}", symbol, price, bid_price, ask_price, volume);
 
     Ok(Quote {
         symbol,
