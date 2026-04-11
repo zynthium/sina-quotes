@@ -3,7 +3,7 @@
 ## 安装型 skill 的 GitHub 路径
 
 ```bash
-npx skills add zynthium/sina-quotes --path skills/sina-quotes
+npx skills add https://github.com/zynthium/sina-quotes --skill sina-quotes
 ```
 
 ## 构建
