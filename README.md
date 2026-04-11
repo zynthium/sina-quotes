@@ -2,6 +2,14 @@
 
 新浪财经数据 Rust SDK，支持历史 K 线数据获取和实时行情 WebSocket 订阅。
 
+## Agent Skill
+
+仓库内置了一个给第三方智能体使用的 skill，重点面向新浪财经外盘行情（`hf_` 符号，如 `hf_OIL`、`hf_CL`、`hf_GC`）。
+
+```bash
+npx skills add https://github.com/zynthium/sina-quotes --skill sina-quotes
+```
+
 ## 特性
 
 - **历史 K 线数据** - 获取分钟级 K 线数据，自动缓存

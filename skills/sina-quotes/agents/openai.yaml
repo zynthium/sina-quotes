@@ -1,0 +1,6 @@
+interface:
+  display_name: "Sina Quotes"
+  short_description: "用新浪财经外盘行情 Rust SDK 获取外盘期货/商品的历史 K 线、实时 Quote 与实时 K 线"
+  default_prompt: "用 sina-quotes 获取 hf_OIL 的 5 分钟历史 K 线，并给我一个可运行的 Rust 示例"
+policy:
+  allow_implicit_invocation: true
