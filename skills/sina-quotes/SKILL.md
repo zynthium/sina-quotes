@@ -1,6 +1,6 @@
 ---
 name: sina-quotes
-description: Use when the user wants to use the `sina-quotes` Rust library or CLI to fetch Sina Finance international futures / overseas commodity market data, especially `hf_` symbols like `hf_OIL`, `hf_CL`, `hf_GC`, `hf_SI`, including historical K-lines, real-time quotes, or real-time K-line aggregation. 也适用于“新浪 外盘 行情 / 外盘期货 / 外盘商品 / 国际期货 / hf_符号 / 历史K线 / 实时行情 / WebSocket / Rust SDK / CLI”等任务；不适用于 A 股、基金、财报或基本面数据。
+description: Use when the user wants to fetch international futures / overseas commodity futures market data, especially `hf_`-style symbols or requests for historical K-lines, real-time quotes, or real-time K-line aggregation, whether or not they explicitly mention Sina or `sina-quotes`. 也适用于“外盘期货 / 外盘商品 / 国际期货 / hf_符号 / 历史K线 / 实时行情 / WebSocket / Rust SDK / CLI”等任务；不适用于 A 股、基金、财报或基本面数据。
 ---
 
 # Sina Quotes
@@ -9,6 +9,8 @@ description: Use when the user wants to use the `sina-quotes` Rust library or CL
 
 ## 适用范围
 
+- 用户想获取外盘商品期货 / 国际期货数据，即使没有明确提到新浪或 `sina-quotes`
+- 新浪财经只是其中一个可用渠道；只要任务是获取这类外盘期货数据，就可以命中此 skill
 - 用户明确提到 `sina-quotes`、`hf_OIL`、`hf_CL`、`hf_GC`、`hf_SI` 等外盘符号
 - 需要用 Rust 获取新浪财经外盘历史 K 线
 - 需要订阅外盘实时 Quote
