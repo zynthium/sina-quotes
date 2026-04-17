@@ -1,4 +1,5 @@
-use crate::data::types::KlineBar;
+use crate::data::types::{FuturesCategory, FuturesMarketHours, KlineBar, TradingSession};
+use serde::Deserialize;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -11,12 +12,83 @@ pub enum Error {
     Empty,
 }
 
+#[derive(Debug, Deserialize)]
+struct MarketHoursPayload {
+    #[serde(default)]
+    timezone: String,
+    #[serde(default)]
+    exchange: String,
+    #[serde(default)]
+    interval: String,
+    #[serde(default, rename = "time")]
+    sessions: Vec<[String; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InferredMarketSymbol {
+    pub(crate) category: FuturesCategory,
+    pub(crate) code: String,
+}
+
 pub async fn fetch_history(
     symbol: &str,
     duration_seconds: u32,
     max_attempts: usize,
 ) -> Result<Vec<KlineBar>, Error> {
     fetch_international_history(symbol, duration_seconds, max_attempts).await
+}
+
+pub async fn fetch_market_hours(
+    symbol: &str,
+    max_attempts: usize,
+) -> Result<FuturesMarketHours, Error> {
+    let inferred = infer_market_symbol(symbol);
+    let category = inferred.category;
+    let code = inferred.code;
+    let var_name = format!("kke_future_{}_{}", category.as_str(), code);
+    let url = format!(
+        "https://stock.finance.sina.com.cn/futures/api/jsonp.php/var%20{}=/InterfaceInfoService.getMarket",
+        urlencoding::encode(&var_name)
+    );
+
+    let params = [("category", category.as_str()), ("symbol", code.as_str())];
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(reqwest::header::ACCEPT, "*/*".parse().unwrap());
+    headers.insert(
+        reqwest::header::REFERER,
+        format!("https://finance.sina.com.cn/futures/quotes/{}.shtml", code)
+            .parse()
+            .unwrap(),
+    );
+    headers.insert(
+        reqwest::header::USER_AGENT,
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+            .parse()
+            .unwrap(),
+    );
+
+    let client = reqwest::Client::new();
+
+    for attempt in 0..max_attempts {
+        let response = client
+            .get(&url)
+            .query(&params)
+            .headers(headers.clone())
+            .send()
+            .await?;
+
+        let text = response.text().await?;
+        let market = parse_market_hours_jsonp(category, &code, &text)?;
+
+        if market.sessions.is_empty() {
+            tracing::warn!("attempt {}: empty market sessions", attempt + 1);
+            continue;
+        }
+
+        return Ok(market);
+    }
+
+    Err(Error::Empty)
 }
 
 async fn fetch_international_history(
@@ -367,6 +439,67 @@ fn compute_bucket_id(datetime_ns: i64, duration_seconds: u32) -> i64 {
     datetime_ns.div_euclid(d)
 }
 
+pub(crate) fn infer_market_symbol(symbol: &str) -> InferredMarketSymbol {
+    let trimmed = symbol.trim();
+    if let Some(stripped) = trimmed.strip_prefix("hf_") {
+        return InferredMarketSymbol {
+            category: FuturesCategory::Hf,
+            code: stripped.to_ascii_uppercase(),
+        };
+    }
+
+    if let Some(stripped) = trimmed.strip_prefix("nf_") {
+        return InferredMarketSymbol {
+            category: FuturesCategory::Nf,
+            code: stripped.to_ascii_uppercase(),
+        };
+    }
+
+    InferredMarketSymbol {
+        category: FuturesCategory::Nf,
+        code: trimmed.to_ascii_uppercase(),
+    }
+}
+
+pub(crate) fn market_hours_cache_key(symbol: &str) -> String {
+    let inferred = infer_market_symbol(symbol);
+    format!("{}:{}", inferred.category.as_str(), inferred.code)
+}
+
+fn parse_market_hours_jsonp(
+    category: FuturesCategory,
+    symbol: &str,
+    text: &str,
+) -> Result<FuturesMarketHours, Error> {
+    let raw = extract_json_object(text)?;
+    let payload: MarketHoursPayload =
+        serde_json::from_str(raw).map_err(|e| Error::Parse(format!("JSON decode: {}", e)))?;
+
+    let sessions = payload
+        .sessions
+        .into_iter()
+        .map(|[start, end]| TradingSession { start, end })
+        .collect();
+
+    Ok(FuturesMarketHours {
+        category,
+        symbol: symbol.to_string(),
+        timezone: payload.timezone,
+        exchange: empty_to_none(payload.exchange),
+        interval: empty_to_none(payload.interval),
+        sessions,
+    })
+}
+
+fn empty_to_none(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 fn extract_json_array(text: &str) -> Result<&str, Error> {
     let start = text
         .find("=([")
@@ -395,9 +528,34 @@ fn extract_json_array(text: &str) -> Result<&str, Error> {
     Ok(&text[array_start..i])
 }
 
+fn extract_json_object(text: &str) -> Result<&str, Error> {
+    let start = text
+        .find("=({")
+        .ok_or_else(|| Error::Parse("no =({ pattern".to_string()))?;
+
+    let object_start = start + 2;
+    let mut depth = 1;
+    let mut i = object_start + 1;
+
+    while i < text.len() {
+        match text.as_bytes()[i] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            return Ok(&text[object_start..i + 1]);
+        }
+        i += 1;
+    }
+
+    Err(Error::Parse("unmatched braces".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::types::FuturesCategory;
 
     fn make_bar(
         date: &str,
@@ -450,6 +608,74 @@ mod tests {
         let text = "var test=([1,2,3);";
         let result = extract_json_array(text);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_json_object_valid() {
+        let text = r#"var kke_future_hf_FEF=({"timezone":"summer","time":[["07:25","23:59"],["00:00","05:15"]]});"#;
+        let result = extract_json_object(text);
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            r#"{"timezone":"summer","time":[["07:25","23:59"],["00:00","05:15"]]}"#
+        );
+    }
+
+    #[test]
+    fn test_infer_market_symbol_hf_prefixed() {
+        let inferred = infer_market_symbol("hf_FEF");
+        assert_eq!(inferred.category, FuturesCategory::Hf);
+        assert_eq!(inferred.code, "FEF");
+    }
+
+    #[test]
+    fn test_infer_market_symbol_nf_prefixed() {
+        let inferred = infer_market_symbol("nf_SC0");
+        assert_eq!(inferred.category, FuturesCategory::Nf);
+        assert_eq!(inferred.code, "SC0");
+    }
+
+    #[test]
+    fn test_infer_market_symbol_bare_defaults_to_nf() {
+        let inferred = infer_market_symbol("sc0");
+        assert_eq!(inferred.category, FuturesCategory::Nf);
+        assert_eq!(inferred.code, "SC0");
+    }
+
+    #[test]
+    fn test_parse_market_hours_hf_jsonp() {
+        let text = r#"/*<script>location.href='//sina.com';</script>*/
+var kke_future_hf_FEF=({"timezone":"summer","time":[["07:25","23:59"],["00:00","05:15"]],"exchange":"(SGX)","t1url":"http:\/\/stock2.finance.sina.com.cn\/futures\/api\/json.php\/GlobalFuturesService.getGlobalFuturesMinLine?symbol=FEF","t4url":"http:\/\/stock2.finance.sina.com.cn\/futures\/api\/json.php\/GlobalFuturesService.getGlobalFutures5MLine?symbol=FEF","kurl":"http:\/\/stock2.finance.sina.com.cn\/futures\/api\/json.php\/GlobalFuturesService.getGlobalFuturesDailyKLine?symbol=FEF"});"#;
+
+        let market = parse_market_hours_jsonp(FuturesCategory::Hf, "FEF", text).unwrap();
+
+        assert_eq!(market.category, FuturesCategory::Hf);
+        assert_eq!(market.symbol, "FEF");
+        assert_eq!(market.timezone, "summer");
+        assert_eq!(market.exchange.as_deref(), Some("(SGX)"));
+        assert_eq!(market.sessions.len(), 2);
+        assert_eq!(market.sessions[0].start, "07:25");
+        assert_eq!(market.sessions[0].end, "23:59");
+        assert_eq!(market.sessions[1].start, "00:00");
+        assert_eq!(market.sessions[1].end, "05:15");
+    }
+
+    #[test]
+    fn test_parse_market_hours_nf_jsonp() {
+        let text = r#"/*<script>location.href='//sina.com';</script>*/
+var kke_future_nf_SC0=({"interval":"","exchange":"","timezone":"summer","t1url":"http:\/\/stock2.finance.sina.com.cn\/futures\/api\/json.php\/InnerFuturesService.getInnerFuturesMinLine?symbol=SC","t4url":"http:\/\/stock2.finance.sina.com.cn\/futures\/api\/json.php\/InnerFuturesService.getInnerFutures5MLine?symbol=SC","kurl":"http:\/\/stock2.finance.sina.com.cn\/futures\/api\/json.php\/InnerFuturesService.getInnerFuturesDailyKLine?symbol=SC","time":[["21:00","24:00"],["00:00","02:30"],["09:00","11:30"],["13:30","15:00"]]});"#;
+
+        let market = parse_market_hours_jsonp(FuturesCategory::Nf, "SC0", text).unwrap();
+
+        assert_eq!(market.category, FuturesCategory::Nf);
+        assert_eq!(market.symbol, "SC0");
+        assert_eq!(market.timezone, "summer");
+        assert_eq!(market.exchange, None);
+        assert_eq!(market.sessions.len(), 4);
+        assert_eq!(market.sessions[0].start, "21:00");
+        assert_eq!(market.sessions[0].end, "24:00");
+        assert_eq!(market.sessions[3].start, "13:30");
+        assert_eq!(market.sessions[3].end, "15:00");
     }
 
     #[test]

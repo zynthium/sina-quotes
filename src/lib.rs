@@ -52,7 +52,9 @@ pub mod symbols; // 外盘期货品种符号
 pub use client::{ClientBuilder, ClientConfig, SinaQuotes};
 pub use data::buffer::{KlineRingBuffer, RingBuffer};
 pub use data::series::KlineSeries;
-pub use data::types::{Duration, KlineBar, KlineData, Quote};
+pub use data::types::{
+    Duration, FuturesCategory, FuturesMarketHours, KlineBar, KlineData, Quote, TradingSession,
+};
 pub use error::{Result, SdkError};
 pub use realtime_kline::{KlineEvent, RealtimeKline};
 pub use storage::cache::{CacheEntryMeta, CacheKey, CacheStats, HistoryCache};

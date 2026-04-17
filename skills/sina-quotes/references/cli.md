@@ -27,6 +27,18 @@ cargo run -- klines hf_GC 15 --count 200
 - 第 2 个参数：分钟周期，例如 `5`、`15`
 - `--count`：想输出的序列长度
 
+## 交易时间段
+
+```bash
+# 查询交易时间段
+cargo run -- market-hours SC0
+
+# 也可以直接传其他期货 symbol
+cargo run -- market-hours hf_FEF
+```
+
+这个命令只需要传 1 个 `symbol`，CLI 会根据它自动识别市场。
+
 ## 实时行情与实时 K 线
 
 如果只是想快速验证实时流程，优先使用仓库里的 `examples/`，因为这些例子已经把订阅句柄和 WebSocket 启动流程写完整了。
@@ -70,6 +82,7 @@ cargo run --example new_api cache
 优先用 CLI / examples：
 
 - 只想手动看一眼新浪外盘数据能不能拿到
+- 只想快速确认某个国内 / 国外期货品种的交易时段
 - 想快速验证 `hf_OIL`、`hf_CL`、`hf_GC` 这类符号是否可读
 - 想做 demo、排查网络、观察输出格式
 

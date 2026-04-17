@@ -173,6 +173,55 @@ impl KlineData {
     }
 }
 
+/// 期货品类
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FuturesCategory {
+    /// 国内期货，对应新浪接口参数 `nf`
+    Nf,
+    /// 国外期货，对应新浪接口参数 `hf`
+    Hf,
+}
+
+impl FuturesCategory {
+    /// 返回新浪接口所需的 category 字符串
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Nf => "nf",
+            Self::Hf => "hf",
+        }
+    }
+}
+
+impl std::fmt::Display for FuturesCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 单个交易时间段
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradingSession {
+    pub start: String,
+    pub end: String,
+}
+
+/// 期货交易时间信息
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FuturesMarketHours {
+    /// 品类：国内 `nf` / 国外 `hf`
+    pub category: FuturesCategory,
+    /// 品种代码
+    pub symbol: String,
+    /// 新浪返回的时区标签，例如 `summer`
+    pub timezone: String,
+    /// 交易所信息，若接口未返回则为 `None`
+    pub exchange: Option<String>,
+    /// 接口中的 interval 字段，若为空则为 `None`
+    pub interval: Option<String>,
+    /// 交易时间段列表
+    pub sessions: Vec<TradingSession>,
+}
+
 /// 实时行情数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Quote {

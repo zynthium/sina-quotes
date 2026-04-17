@@ -14,6 +14,7 @@ npx skills add https://github.com/zynthium/sina-quotes --skill sina-quotes
 
 - **历史 K 线数据** - 获取分钟级 K 线数据，自动缓存
 - **实时行情订阅** - WebSocket 实时推送，支持自动重连
+- **交易时间段查询** - 按 `symbol` 查询期货交易时段
 - **K 线序列管理** - 类似 TqSdk 的 `get_kline_serial()` 接口
 - **高性能** - 环形缓冲区、RangeSet 缓存优化
 
@@ -65,6 +66,7 @@ let client = SinaQuotes::builder()
     .http_timeout(Duration::from_secs(30))
     .default_data_length(200)
     .cache_dir("./cache".into())
+    .market_hours_cache_ttl(Duration::from_secs(6 * 60 * 60))
     .build()
     .await?;
 ```
@@ -111,6 +113,23 @@ let quote = stream.borrow();
 println!("{} 价格: {:.2}", quote.symbol, quote.price);
 ```
 
+### 交易时间段 (FuturesMarketHours)
+
+查询新浪期货接口暴露的交易时段。入口是 `client.fetch_market_hours(symbol).await?`，接口会根据传入的 `symbol` 自动识别市场，并在客户端内按 TTL 复用结果。
+
+```rust
+use sina_quotes::SinaQuotes;
+
+let client = SinaQuotes::new().await?;
+
+let market_hours = client.fetch_market_hours("SC0").await?;
+
+println!("category={}", market_hours.category);
+for session in &market_hours.sessions {
+    println!("{} - {}", session.start, session.end);
+}
+```
+
 ## API 参考
 
 ### 核心类型
@@ -124,6 +143,9 @@ println!("{} 价格: {:.2}", quote.symbol, quote.price);
 | `KlineBar` | K 线柱数据 |
 | `Quote` | 行情数据 |
 | `Duration` | 时间周期 |
+| `FuturesCategory` | 期货品类：`nf` / `hf` |
+| `FuturesMarketHours` | 交易时间段信息 |
+| `TradingSession` | 单个交易时间段 |
 
 ### Duration 周期
 
@@ -166,6 +188,12 @@ cargo run -- klines hf_OIL 5
 
 # 带参数
 cargo run -- klines hf_GC 15 --count 200
+
+# 查询交易时间段
+cargo run -- market-hours SC0
+
+# 也可以直接传其他期货 symbol
+cargo run -- market-hours hf_FEF
 
 # 订阅实时行情
 cargo run -- subscribe hf_OIL hf_GC
@@ -220,7 +248,7 @@ src/
 ├── symbols.rs          # 外盘期货品种符号
 ├── error.rs            # 错误定义
 ├── data/               # 数据层
-│   ├── types.rs        # KlineBar, Quote, Duration
+│   ├── types.rs        # KlineBar, Quote, Duration, FuturesMarketHours
 │   ├── buffer.rs       # 环形缓冲区
 │   └── series.rs       # KlineSeries K 线序列
 ├── net/                # 网络层

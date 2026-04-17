@@ -2,7 +2,9 @@
 
 ## 作用范围
 
-这个库主要用于新浪财经外盘行情，重点是 `hf_` 前缀的外盘期货和外盘商品符号。
+这个库的历史 K 线和实时行情主要用于新浪财经外盘行情。
+
+另外，交易时间段接口 `fetch_market_hours(symbol)` 会根据传入的 `symbol` 自动识别市场，并在客户端内按 TTL 缓存结果。
 
 常见例子：
 
@@ -27,6 +29,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 - 拉一段历史 K 线：`get_kline_serial`
 - 订阅实时快照 Quote：`subscribe_quote` 或 `subscribe_quotes` + `start_websocket`
 - 订阅实时 K 线：`subscribe_realtime_kline` + `start_websocket`
+- 查询交易时间段：`fetch_market_hours`
 - 想先手动试一下：看 `references/cli.md`
 
 ## 历史 K 线
@@ -163,6 +166,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `ev.is_completed == false` 表示当前正在形成的 bar
 - `ev.is_completed == true` 表示一根 bar 已经完成
 
+## 交易时间段
+
+```rust
+use sina_quotes::SinaQuotes;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = SinaQuotes::new().await?;
+
+    let market_hours = client.fetch_market_hours("SC0").await?;
+
+    println!("category={}", market_hours.category);
+    for session in &market_hours.sessions {
+        println!("{} - {}", session.start, session.end);
+    }
+
+    client.close().await;
+    Ok(())
+}
+```
+
+关键点：
+
+- 入口是 `client.fetch_market_hours(symbol).await?`
+- 接口会根据 `symbol` 自动识别市场
+- 同一个客户端内会按 TTL 复用结果，避免每次都请求远程接口
+- 返回结果里的 `category` 会保留最终识别出的 `nf` / `hf`
+
 ## 可选配置
 
 如果需要缓存或超时配置，使用 builder：
@@ -177,6 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .http_timeout(StdDuration::from_secs(10))
         .default_data_length(300)
         .cache_dir("./cache".into())
+        .market_hours_cache_ttl(StdDuration::from_secs(6 * 60 * 60))
         .build()
         .await?;
 
@@ -192,6 +224,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `default_data_length(...)`
 - `cache_dir(...)`
 - `cache_capacity(...)`
+- `market_hours_cache_ttl(...)`
 
 ## 常见坑
 

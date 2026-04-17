@@ -1,5 +1,5 @@
 use clap::Parser;
-use sina_quotes::{Duration, SinaQuotes};
+use sina_quotes::{Duration, FuturesMarketHours, SinaQuotes};
 
 #[derive(Parser, Debug)]
 #[command(name = "sina-quotes")]
@@ -14,6 +14,35 @@ enum Cmd {
     },
     /// 订阅实时行情
     Subscribe { symbols: Vec<String> },
+    /// 获取期货交易时间段
+    MarketHours { symbol: String },
+}
+
+fn render_market_hours(market_hours: &FuturesMarketHours) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Category: {}\n", market_hours.category));
+    out.push_str(&format!("Symbol: {}\n", market_hours.symbol));
+    out.push_str(&format!("Timezone: {}\n", market_hours.timezone));
+
+    if let Some(exchange) = &market_hours.exchange {
+        out.push_str(&format!("Exchange: {}\n", exchange));
+    }
+
+    if let Some(interval) = &market_hours.interval {
+        out.push_str(&format!("Interval: {}\n", interval));
+    }
+
+    out.push_str("Sessions:\n");
+    for (index, session) in market_hours.sessions.iter().enumerate() {
+        out.push_str(&format!(
+            "  {}. {} - {}\n",
+            index + 1,
+            session.start,
+            session.end
+        ));
+    }
+
+    out
 }
 
 #[tokio::main]
@@ -65,7 +94,71 @@ async fn main() -> anyhow::Result<()> {
             // Keep the program running
             tokio::time::sleep(std::time::Duration::MAX).await;
         }
+        Cmd::MarketHours { symbol } => {
+            tracing::info!("fetching market hours for {symbol}");
+
+            let client = SinaQuotes::new().await?;
+            let market_hours = client.fetch_market_hours(&symbol).await?;
+
+            print!("{}", render_market_hours(&market_hours));
+        }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sina_quotes::{FuturesCategory, FuturesMarketHours, TradingSession};
+
+    #[test]
+    fn test_parse_market_hours_command_with_bare_symbol() {
+        let cmd = Cmd::try_parse_from(["sina-quotes", "market-hours", "SC0"]).unwrap();
+
+        match cmd {
+            Cmd::MarketHours { symbol } => {
+                assert_eq!(symbol, "SC0");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_market_hours_command_with_prefixed_symbol() {
+        let cmd = Cmd::try_parse_from(["sina-quotes", "market-hours", "hf_FEF"]).unwrap();
+
+        match cmd {
+            Cmd::MarketHours { symbol } => {
+                assert_eq!(symbol, "hf_FEF");
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_render_market_hours_output() {
+        let output = render_market_hours(&FuturesMarketHours {
+            category: FuturesCategory::Hf,
+            symbol: "FEF".to_string(),
+            timezone: "summer".to_string(),
+            exchange: Some("(SGX)".to_string()),
+            interval: None,
+            sessions: vec![
+                TradingSession {
+                    start: "07:25".to_string(),
+                    end: "23:59".to_string(),
+                },
+                TradingSession {
+                    start: "00:00".to_string(),
+                    end: "05:15".to_string(),
+                },
+            ],
+        });
+
+        assert_eq!(
+            output,
+            "Category: hf\nSymbol: FEF\nTimezone: summer\nExchange: (SGX)\nSessions:\n  1. 07:25 - 23:59\n  2. 00:00 - 05:15\n"
+        );
+    }
 }

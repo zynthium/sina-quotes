@@ -43,6 +43,9 @@ pub enum SdkError {
     #[error("历史数据不可用: {0}")]
     HistoryUnavailable(String),
 
+    #[error("交易时间信息不可用: {category}/{symbol}")]
+    MarketHoursUnavailable { category: String, symbol: String },
+
     #[error("符号不存在: {0}")]
     SymbolNotFound(String),
 

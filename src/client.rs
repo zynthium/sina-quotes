@@ -6,15 +6,16 @@
 //! - 历史数据获取（带缓存）
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration as StdDuration;
+use std::sync::{Arc, RwLock as StdRwLock};
+use std::time::{Duration as StdDuration, Instant};
 
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, watch};
 
 use crate::data::series::KlineSeries;
-use crate::data::types::{Duration, KlineBar, Quote};
+use crate::data::types::{Duration, FuturesMarketHours, KlineBar, Quote};
 use crate::error::{Result, SdkError};
 use crate::net::history;
 use crate::net::ws_service::WsConnection;
@@ -58,6 +59,50 @@ where
     }
 }
 
+#[derive(Clone)]
+struct MarketHoursCacheEntry {
+    value: FuturesMarketHours,
+    fetched_at: Instant,
+}
+
+async fn fetch_market_hours_cached<F, Fut>(
+    cache: &Arc<StdRwLock<HashMap<String, MarketHoursCacheEntry>>>,
+    ttl: StdDuration,
+    symbol: &str,
+    now: Instant,
+    fetcher: F,
+) -> std::result::Result<FuturesMarketHours, history::Error>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = std::result::Result<FuturesMarketHours, history::Error>>,
+{
+    let cache_key = history::market_hours_cache_key(symbol);
+
+    {
+        let cache_guard = cache.read().unwrap();
+        if let Some(entry) = cache_guard.get(&cache_key)
+            && now.saturating_duration_since(entry.fetched_at) < ttl
+        {
+            return Ok(entry.value.clone());
+        }
+    }
+
+    let market_hours = fetcher(symbol.to_string()).await?;
+
+    {
+        let mut cache_guard = cache.write().unwrap();
+        cache_guard.insert(
+            cache_key,
+            MarketHoursCacheEntry {
+                value: market_hours.clone(),
+                fetched_at: now,
+            },
+        );
+    }
+
+    Ok(market_hours)
+}
+
 /// 客户端配置
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -73,6 +118,8 @@ pub struct ClientConfig {
     pub cache_capacity: usize,
     /// 默认 K线数据长度
     pub default_data_length: usize,
+    /// 交易时间段缓存 TTL
+    pub market_hours_cache_ttl: StdDuration,
 }
 
 impl Default for ClientConfig {
@@ -84,6 +131,7 @@ impl Default for ClientConfig {
             cache_dir: None,
             cache_capacity: 100 * 1024 * 1024, // 100MB
             default_data_length: 100,
+            market_hours_cache_ttl: StdDuration::from_secs(6 * 60 * 60),
         }
     }
 }
@@ -130,6 +178,11 @@ impl ClientBuilder {
         self
     }
 
+    pub fn market_hours_cache_ttl(mut self, ttl: StdDuration) -> Self {
+        self.config.market_hours_cache_ttl = ttl;
+        self
+    }
+
     pub async fn build(self) -> Result<SinaQuotes> {
         SinaQuotes::with_config(self.config).await
     }
@@ -171,6 +224,8 @@ pub struct SinaQuotes {
     realtime_kline_engines: Arc<RwLock<HashMap<String, RealtimeKlineEngine>>>,
     /// 历史数据缓存
     cache: Option<Arc<HistoryCache>>,
+    /// 交易时间段缓存
+    market_hours_cache: Arc<StdRwLock<HashMap<String, MarketHoursCacheEntry>>>,
     /// 更新通知
     update_tx: watch::Sender<u64>,
     update_rx: watch::Receiver<u64>,
@@ -207,6 +262,7 @@ impl SinaQuotes {
             quote_feed_manager: QuoteFeedManager::new(),
             realtime_kline_engines: Arc::new(RwLock::new(HashMap::new())),
             cache,
+            market_hours_cache: Arc::new(StdRwLock::new(HashMap::new())),
             update_tx,
             update_rx,
             generation: 0,
@@ -415,6 +471,27 @@ impl SinaQuotes {
         self._fetch_history_internal(symbol, duration, count).await
     }
 
+    /// 获取期货交易时间段
+    pub async fn fetch_market_hours(&self, symbol: &str) -> Result<FuturesMarketHours> {
+        self._check_closed().await?;
+        fetch_market_hours_cached(
+            &self.market_hours_cache,
+            self.config.market_hours_cache_ttl,
+            symbol,
+            Instant::now(),
+            |symbol| async move { history::fetch_market_hours(&symbol, 3).await },
+        )
+        .await
+        .map_err(|e| match e {
+            history::Error::Request(e) => SdkError::Http(e),
+            history::Error::Parse(s) => SdkError::Parse(s),
+            history::Error::Empty => SdkError::MarketHoursUnavailable {
+                category: infer_market_hours_category(symbol).to_string(),
+                symbol: symbol.to_string(),
+            },
+        })
+    }
+
     /// 内部：获取历史数据
     async fn _fetch_history_internal(
         &self,
@@ -538,6 +615,7 @@ impl SinaQuotes {
                 .clear_all()
                 .map_err(|e| SdkError::Init(e.to_string()))?;
         }
+        self.market_hours_cache.write().unwrap().clear();
         Ok(())
     }
 
@@ -629,6 +707,14 @@ impl SinaQuotes {
     }
 }
 
+fn infer_market_hours_category(symbol: &str) -> &'static str {
+    if symbol.trim().starts_with("hf_") {
+        "hf"
+    } else {
+        "nf"
+    }
+}
+
 impl Clone for SinaQuotes {
     fn clone(&self) -> Self {
         Self {
@@ -638,6 +724,7 @@ impl Clone for SinaQuotes {
             quote_feed_manager: self.quote_feed_manager.clone(),
             realtime_kline_engines: Arc::clone(&self.realtime_kline_engines),
             cache: self.cache.clone(),
+            market_hours_cache: Arc::clone(&self.market_hours_cache),
             update_tx: self.update_tx.clone(),
             update_rx: self.update_rx.clone(),
             generation: self.generation,
@@ -660,6 +747,23 @@ impl std::fmt::Debug for SinaQuotes {
 mod tests {
     use super::*;
     use crate::data::series::KlineSeries;
+    use crate::data::types::{FuturesCategory, TradingSession};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    fn make_market_hours(symbol: &str, timezone: &str) -> FuturesMarketHours {
+        FuturesMarketHours {
+            category: FuturesCategory::Nf,
+            symbol: symbol.to_string(),
+            timezone: timezone.to_string(),
+            exchange: None,
+            interval: None,
+            sessions: vec![TradingSession {
+                start: "09:00".to_string(),
+                end: "15:00".to_string(),
+            }],
+        }
+    }
 
     #[tokio::test]
     async fn test_client_creation() {
@@ -672,12 +776,14 @@ mod tests {
         let client = SinaQuotes::builder()
             .http_timeout(StdDuration::from_secs(5))
             .default_data_length(200)
+            .market_hours_cache_ttl(StdDuration::from_secs(42))
             .build()
             .await;
 
         assert!(client.is_ok());
         let c = client.unwrap();
         assert_eq!(c.config.default_data_length, 200);
+        assert_eq!(c.config.market_hours_cache_ttl, StdDuration::from_secs(42));
     }
 
     #[test]
@@ -688,6 +794,97 @@ mod tests {
         let (start_id, end_id) = compute_cache_window(duration, 3, now_ns);
         assert_eq!(start_id, 98);
         assert_eq!(end_id, 101);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_market_hours_cached_hits_cache_within_ttl() {
+        let cache = Arc::new(StdRwLock::new(
+            HashMap::<String, MarketHoursCacheEntry>::new(),
+        ));
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let now = Instant::now();
+
+        let first = fetch_market_hours_cached(&cache, StdDuration::from_secs(300), "SC0", now, {
+            let fetch_count = Arc::clone(&fetch_count);
+            move |symbol| {
+                let fetch_count = Arc::clone(&fetch_count);
+                async move {
+                    fetch_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(make_market_hours(&symbol, "summer"))
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        let second = fetch_market_hours_cached(
+            &cache,
+            StdDuration::from_secs(300),
+            "nf_SC0",
+            now + StdDuration::from_secs(60),
+            {
+                let fetch_count = Arc::clone(&fetch_count);
+                move |symbol| {
+                    let fetch_count = Arc::clone(&fetch_count);
+                    async move {
+                        fetch_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(make_market_hours(&symbol, "winter"))
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 1);
+        assert_eq!(first.timezone, "summer");
+        assert_eq!(second.timezone, "summer");
+        assert_eq!(second.symbol, "SC0");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_market_hours_cached_refetches_after_ttl() {
+        let cache = Arc::new(StdRwLock::new(
+            HashMap::<String, MarketHoursCacheEntry>::new(),
+        ));
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let now = Instant::now();
+
+        let first = fetch_market_hours_cached(&cache, StdDuration::from_secs(300), "SC0", now, {
+            let fetch_count = Arc::clone(&fetch_count);
+            move |symbol| {
+                let fetch_count = Arc::clone(&fetch_count);
+                async move {
+                    fetch_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(make_market_hours(&symbol, "summer"))
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        let second = fetch_market_hours_cached(
+            &cache,
+            StdDuration::from_secs(300),
+            "SC0",
+            now + StdDuration::from_secs(301),
+            {
+                let fetch_count = Arc::clone(&fetch_count);
+                move |symbol| {
+                    let fetch_count = Arc::clone(&fetch_count);
+                    async move {
+                        fetch_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(make_market_hours(&symbol, "winter"))
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 2);
+        assert_eq!(first.timezone, "summer");
+        assert_eq!(second.timezone, "winter");
     }
 
     #[tokio::test]
