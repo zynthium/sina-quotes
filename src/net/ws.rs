@@ -26,6 +26,17 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+fn parse_quote_lines(
+    text: &str,
+    parse_fn: fn(&str) -> std::result::Result<Quote, Error>,
+) -> Vec<std::result::Result<Quote, Error>> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(parse_fn)
+        .collect()
+}
+
 fn normalize_code(code: &str) -> String {
     let code = code.trim();
     if code.is_empty() {
@@ -151,13 +162,15 @@ async fn connect_and_stream(
                             println!("[WS RAW] {}", text);
                         }
 
-                        match parse_fn(&text) {
-                            Ok(quote) => {
-                                let _ = tx.send(Ok(quote)).await;
-                            }
-                            Err(e) => {
-                                if dump_raw {
-                                    println!("[WS RAW] parse error: {}", e);
+                        for result in parse_quote_lines(&text, parse_fn) {
+                            match result {
+                                Ok(quote) => {
+                                    let _ = tx.send(Ok(quote)).await;
+                                }
+                                Err(e) => {
+                                    if dump_raw {
+                                        println!("[WS RAW] parse error: {}", e);
+                                    }
                                 }
                             }
                         }
@@ -346,5 +359,24 @@ mod tests {
         let text = "sh510050=1.0,2.0;";
         let result = parse_quote(text);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_international_quote_frame_yields_all_lines() {
+        let text = concat!(
+            "hf_OIL=91.724,,92.420,92.490,98.980,86.090,05:59:57,99.390,98.450,0,10,12,2026-04-18,布伦特原油,582877\n",
+            "hf_GC=4844.320,,4848.800,4849.700,4917.700,4785.900,04:59:59,4808.300,4811.800,0,2,1,2026-04-18,纽约黄金,0\n"
+        );
+
+        let quotes: Vec<Quote> = parse_quote_lines(text, parse_international_quote)
+            .into_iter()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+
+        assert_eq!(quotes.len(), 2);
+        assert_eq!(quotes[0].symbol, "hf_OIL");
+        assert_eq!(quotes[0].prev_settle, 99.390);
+        assert_eq!(quotes[1].symbol, "hf_GC");
+        assert_eq!(quotes[1].prev_settle, 4808.300);
     }
 }

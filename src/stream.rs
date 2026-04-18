@@ -318,6 +318,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_subscribe_multiple_immediately_receives_latest_quote_for_each_symbol() {
+        let manager = QuoteManager::new();
+
+        manager
+            .update(Quote {
+                symbol: "hf_CL".to_string(),
+                price: 100.0,
+                prev_settle: 95.0,
+                ..Default::default()
+            })
+            .await;
+        manager
+            .update(Quote {
+                symbol: "hf_GC".to_string(),
+                price: 200.0,
+                prev_settle: 190.0,
+                ..Default::default()
+            })
+            .await;
+
+        let mut streams = manager.subscribe_multiple(&["hf_CL", "hf_GC"]).await;
+
+        tokio::time::timeout(StdDuration::from_millis(20), streams[0].changed())
+            .await
+            .expect("hf_CL latest quote should be replayed")
+            .expect("watch channel should stay open");
+        tokio::time::timeout(StdDuration::from_millis(20), streams[1].changed())
+            .await
+            .expect("hf_GC latest quote should be replayed")
+            .expect("watch channel should stay open");
+
+        let quote1 = streams[0].get();
+        let quote2 = streams[1].get();
+        assert_eq!(quote1.symbol, "hf_CL");
+        assert_eq!(quote1.price, 100.0);
+        assert_eq!(quote1.prev_settle, 95.0);
+        assert_eq!(quote2.symbol, "hf_GC");
+        assert_eq!(quote2.price, 200.0);
+        assert_eq!(quote2.prev_settle, 190.0);
+    }
+
+    #[tokio::test]
     async fn test_multiple_readers() {
         let (tx, rx) = watch::channel(Quote::default());
         let stream1 = QuoteStream::new(rx);
