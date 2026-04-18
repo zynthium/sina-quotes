@@ -72,10 +72,15 @@ impl std::fmt::Debug for QuoteStream {
 
 use std::collections::HashMap;
 
+struct QuoteEntry {
+    tx: watch::Sender<Quote>,
+    has_real_quote: bool,
+}
+
 /// 多行情流管理器
 pub struct QuoteManager {
-    /// 符号 -> watch::Sender
-    streams: Arc<RwLock<HashMap<String, watch::Sender<Quote>>>>,
+    /// 符号 -> 最新行情通道及其有效性
+    streams: Arc<RwLock<HashMap<String, QuoteEntry>>>,
 }
 
 pub struct QuoteFeedManager {
@@ -128,6 +133,13 @@ impl Clone for QuoteFeedManager {
 }
 
 impl QuoteManager {
+    fn initial_quote(symbol: &str) -> Quote {
+        Quote {
+            symbol: symbol.to_string(),
+            ..Default::default()
+        }
+    }
+
     /// 创建新的管理器
     pub fn new() -> Self {
         Self {
@@ -139,21 +151,19 @@ impl QuoteManager {
     pub async fn subscribe(&self, symbol: &str) -> QuoteStream {
         let mut streams = self.streams.write().await;
 
-        let tx = streams.entry(symbol.to_string()).or_insert_with(|| {
-            let (tx, _) = watch::channel(Quote::default());
-            tx
+        let entry = streams.entry(symbol.to_string()).or_insert_with(|| {
+            let (tx, _) = watch::channel(Self::initial_quote(symbol));
+            QuoteEntry {
+                tx,
+                has_real_quote: false,
+            }
         });
 
-        let stream = QuoteStream::new(tx.subscribe());
-
-        // 发送初始 Quote 以设置符号
-        let initial = Quote {
-            symbol: symbol.to_string(),
-            ..Default::default()
-        };
-        let _ = tx.send(initial);
-
-        stream
+        let mut rx = entry.tx.subscribe();
+        if entry.has_real_quote {
+            rx.mark_changed();
+        }
+        QuoteStream::new(rx)
     }
 
     /// 订阅多个行情
@@ -169,11 +179,19 @@ impl QuoteManager {
 
     /// 更新行情
     pub async fn update(&self, quote: Quote) {
-        let streams = self.streams.read().await;
+        let mut streams = self.streams.write().await;
+        let symbol = quote.symbol.clone();
 
-        if let Some(tx) = streams.get(&quote.symbol) {
-            let _ = tx.send(quote);
-        }
+        let entry = streams.entry(symbol).or_insert_with(|| {
+            let (tx, _) = watch::channel(quote.clone());
+            QuoteEntry {
+                tx,
+                has_real_quote: false,
+            }
+        });
+
+        entry.has_real_quote = true;
+        let _ = entry.tx.send(quote);
     }
 
     /// 获取所有符号
@@ -212,6 +230,7 @@ impl Clone for QuoteManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration as StdDuration;
     use tokio::sync::watch;
 
     #[tokio::test]
@@ -254,6 +273,48 @@ mod tests {
         // stream1 应该能看到更新
         let quote = stream1.borrow();
         assert_eq!(quote.price, 100.0);
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_does_not_emit_placeholder_change() {
+        let manager = QuoteManager::new();
+        let mut stream = manager.subscribe("hf_CL").await;
+
+        let res = tokio::time::timeout(StdDuration::from_millis(20), stream.changed()).await;
+
+        assert!(
+            res.is_err(),
+            "placeholder event should not wake subscribers"
+        );
+        let quote = stream.borrow();
+        assert_eq!(quote.symbol, "hf_CL");
+        assert_eq!(quote.price, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_new_subscriber_immediately_receives_latest_real_quote() {
+        let manager = QuoteManager::new();
+
+        manager
+            .update(Quote {
+                symbol: "hf_CL".to_string(),
+                price: 100.0,
+                prev_settle: 95.0,
+                ..Default::default()
+            })
+            .await;
+
+        let mut stream = manager.subscribe("hf_CL").await;
+
+        tokio::time::timeout(StdDuration::from_millis(20), stream.changed())
+            .await
+            .expect("latest real quote should be replayed")
+            .expect("watch channel should stay open");
+
+        let quote = stream.get();
+        assert_eq!(quote.symbol, "hf_CL");
+        assert_eq!(quote.price, 100.0);
+        assert_eq!(quote.prev_settle, 95.0);
     }
 
     #[tokio::test]
