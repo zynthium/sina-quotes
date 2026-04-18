@@ -25,6 +25,9 @@ use crate::storage::cache::HistoryCache;
 use crate::storage::quote_cache::QuoteCache;
 use crate::stream::{QuoteFeedManager, QuoteManager, QuoteStream};
 
+const DEFAULT_CACHE_DIR: &str = ".sina-quotes";
+const TEMP_CACHE_DIR: &str = "sina_quotes_cache_1";
+
 fn compute_cache_window(duration: Duration, count: usize, now_ns: i64) -> (i64, i64) {
     let dur_ns = (duration.as_secs() as i64) * 1_000_000_000;
     if count == 0 || dur_ns <= 0 {
@@ -40,6 +43,16 @@ fn compute_cache_window(duration: Duration, count: usize, now_ns: i64) -> (i64, 
 fn take_tail_bars(bars: Vec<KlineBar>, count: usize) -> Vec<KlineBar> {
     let skip = bars.len().saturating_sub(count);
     bars.into_iter().skip(skip).collect()
+}
+
+fn resolve_default_cache_dir(home_dir: Option<PathBuf>, temp_dir: PathBuf) -> PathBuf {
+    home_dir
+        .map(|home| home.join(DEFAULT_CACHE_DIR))
+        .unwrap_or_else(|| temp_dir.join(TEMP_CACHE_DIR))
+}
+
+fn default_cache_dir() -> PathBuf {
+    resolve_default_cache_dir(dirs::home_dir(), std::env::temp_dir())
 }
 
 fn parse_session_minutes(value: &str) -> Option<u32> {
@@ -255,7 +268,7 @@ impl Default for ClientConfig {
             http_timeout: StdDuration::from_secs(10),
             ws_reconnect_delay: StdDuration::from_secs(2),
             max_reconnect_attempts: 5,
-            cache_dir: None,
+            cache_dir: Some(default_cache_dir()),
             cache_capacity: 100 * 1024 * 1024, // 100MB
             default_data_length: 100,
             market_hours_cache_ttl: StdDuration::from_secs(6 * 60 * 60),
@@ -1000,6 +1013,21 @@ mod tests {
         assert_eq!(end_id, 101);
     }
 
+    #[test]
+    fn test_resolve_default_cache_dir_prefers_home() {
+        let dir = resolve_default_cache_dir(
+            Some(PathBuf::from("/tmp/fake-home")),
+            PathBuf::from("/tmp/fallback"),
+        );
+        assert_eq!(dir, PathBuf::from("/tmp/fake-home/.sina-quotes"));
+    }
+
+    #[test]
+    fn test_resolve_default_cache_dir_falls_back_to_temp() {
+        let dir = resolve_default_cache_dir(None, PathBuf::from("/tmp/fallback"));
+        assert_eq!(dir, PathBuf::from("/tmp/fallback/sina_quotes_cache_1"));
+    }
+
     #[tokio::test]
     async fn test_fetch_market_hours_cached_hits_cache_within_ttl() {
         let cache = Arc::new(StdRwLock::new(
@@ -1421,5 +1449,18 @@ mod tests {
         assert_eq!(quote.volume, 1234.0);
         assert_eq!(quote.quote_time, "14:59:59");
         assert_eq!(quote.date, "2026-04-18");
+    }
+
+    #[tokio::test]
+    async fn test_builder_uses_explicit_cache_dir_override() {
+        let dir = tempdir().unwrap();
+        let client = SinaQuotes::builder()
+            .cache_dir(dir.path().to_path_buf())
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(client.config.cache_dir.as_deref(), Some(dir.path()));
+        assert!(client.cache_stats().is_some());
     }
 }
