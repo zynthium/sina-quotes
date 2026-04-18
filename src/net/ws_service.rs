@@ -10,7 +10,10 @@ use futures_util::StreamExt;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 
+use crate::data::types::Quote;
 use crate::net::ws;
+use crate::storage::cache::HistoryCache;
+use crate::storage::quote_cache::QuoteCache;
 use crate::stream::{QuoteFeedManager, QuoteManager};
 
 /// WebSocket 连接状态
@@ -29,16 +32,20 @@ pub struct WsConnection {
     state: Arc<RwLock<WsState>>,
     quote_manager: QuoteManager,
     quote_feed_manager: QuoteFeedManager,
+    history_cache: Option<Arc<HistoryCache>>,
+    quote_cache: Option<Arc<QuoteCache>>,
     closed: Arc<RwLock<bool>>,
     reconnect_delay: Duration,
     max_attempts: u32,
 }
 
 impl WsConnection {
-    pub fn new(
+    pub(crate) fn new(
         symbols: Vec<String>,
         quote_manager: QuoteManager,
         quote_feed_manager: QuoteFeedManager,
+        history_cache: Option<Arc<HistoryCache>>,
+        quote_cache: Option<Arc<QuoteCache>>,
         reconnect_delay: Duration,
         max_attempts: u32,
     ) -> Self {
@@ -47,9 +54,36 @@ impl WsConnection {
             state: Arc::new(RwLock::new(WsState::Disconnected)),
             quote_manager,
             quote_feed_manager,
+            history_cache,
+            quote_cache,
             closed: Arc::new(RwLock::new(false)),
             reconnect_delay,
             max_attempts,
+        }
+    }
+
+    fn persist_quote(&self, quote: &Quote) {
+        let previous = self
+            .quote_cache
+            .as_ref()
+            .and_then(|cache| match cache.get(&quote.symbol) {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!("读取行情快照缓存失败: {}", err);
+                    None
+                }
+            });
+
+        if let Some(history_cache) = self.history_cache.as_ref()
+            && let Err(err) = history_cache.apply_quote(previous.as_ref(), quote)
+        {
+            tracing::warn!("实时行情写入 K 线缓存失败: {}", err);
+        }
+
+        if let Some(quote_cache) = self.quote_cache.as_ref()
+            && let Err(err) = quote_cache.put(quote)
+        {
+            tracing::warn!("实时行情写入快照缓存失败: {}", err);
         }
     }
 
@@ -99,6 +133,7 @@ impl WsConnection {
 
                         match result {
                             Ok(quote) => {
+                                tokio::task::block_in_place(|| self.persist_quote(&quote));
                                 self.quote_manager.update(quote.clone()).await;
                                 self.quote_feed_manager.publish(quote).await;
                             }
@@ -153,6 +188,7 @@ impl WsConnection {
 
                             match result {
                                 Ok(quote) => {
+                                    tokio::task::block_in_place(|| self.persist_quote(&quote));
                                     self.quote_manager.update(quote.clone()).await;
                                     self.quote_feed_manager.publish(quote).await;
                                 }
@@ -217,6 +253,8 @@ mod tests {
             vec!["hf_CL".to_string()],
             quote_manager,
             QuoteFeedManager::new(),
+            None,
+            None,
             Duration::from_secs(1),
             3,
         );

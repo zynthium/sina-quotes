@@ -42,7 +42,7 @@ async fn main() -> Result<(), sina_quotes::SdkError> {
         .await?;
     
     // 读取数据
-    for bar in series.read() {
+    for bar in series.read_all() {
         println!("#{:03} O={:.2} H={:.2} L={:.2} C={:.2}",
             bar.id, bar.open, bar.high, bar.low, bar.close);
     }
@@ -80,11 +80,14 @@ let series = client
     .get_kline_serial("hf_OIL", Duration::minutes(1), 100)
     .await?;
 
-// 读取所有数据
-let bars = series.read();
+// 读取所有数据（包括正在形成的当前 K 线）
+let bars = series.read_all();
 for bar in bars.iter() {
     println!("{:?}", bar);
 }
+
+// 只读取已完成的 K 线
+let completed_bars = series.read();
 
 // 获取最新完成 K 线
 if let Some(last) = series.last() {
@@ -103,13 +106,18 @@ if let Some(current) = series.current() {
 
 ```rust
 // 订阅单个
-let stream = client.subscribe_quote("hf_CL").await?;
+let mut stream = client.subscribe_quote("hf_CL").await?;
+
+// 订阅后需要显式启动 WebSocket
+client.start_websocket(vec!["hf_CL".to_string()]).await?;
+
+stream.changed().await?;
 
 // 订阅多个
 let streams = client.subscribe_quotes(&["hf_OIL", "hf_GC"]).await?;
 
 // 获取当前行情
-let quote = stream.borrow();
+let quote = stream.get();
 println!("{} 价格: {:.2}", quote.symbol, quote.price);
 ```
 

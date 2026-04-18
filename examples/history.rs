@@ -36,12 +36,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let series = client.get_kline_serial(&symbol, duration, count).await?;
+    let bars = series.read_all();
 
     println!("symbol={}", series.symbol());
     println!("duration={}", series.duration());
-    println!("len={}/{}", series.len(), series.capacity());
+    println!("len={}/{}", bars.len(), series.capacity());
 
-    let bars = series.read();
     for (i, bar) in bars.iter().take(5).enumerate() {
         println!("[{}] {}", i, bar);
     }

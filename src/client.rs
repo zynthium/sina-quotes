@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration as StdDuration, Instant};
 
+use chrono::Timelike;
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, watch};
 
@@ -21,6 +22,7 @@ use crate::net::history;
 use crate::net::ws_service::WsConnection;
 use crate::realtime_kline::{KlineAggregator, KlineEvent, RealtimeKline};
 use crate::storage::cache::HistoryCache;
+use crate::storage::quote_cache::QuoteCache;
 use crate::stream::{QuoteFeedManager, QuoteManager, QuoteStream};
 
 fn compute_cache_window(duration: Duration, count: usize, now_ns: i64) -> (i64, i64) {
@@ -33,6 +35,131 @@ fn compute_cache_window(duration: Duration, count: usize, now_ns: i64) -> (i64, 
     let end_id = now_bucket_id + 1;
     let start_id = end_id - (count as i64);
     (start_id, end_id)
+}
+
+fn take_tail_bars(bars: Vec<KlineBar>, count: usize) -> Vec<KlineBar> {
+    let skip = bars.len().saturating_sub(count);
+    bars.into_iter().skip(skip).collect()
+}
+
+fn parse_session_minutes(value: &str) -> Option<u32> {
+    let (hour, minute) = value.split_once(':')?;
+    let hour: u32 = hour.parse().ok()?;
+    let minute: u32 = minute.parse().ok()?;
+
+    if minute >= 60 {
+        return None;
+    }
+
+    if hour == 24 && minute == 0 {
+        return Some(24 * 60);
+    }
+
+    if hour >= 24 {
+        return None;
+    }
+
+    Some(hour * 60 + minute)
+}
+
+fn is_market_open_at(market_hours: &FuturesMarketHours, now_ns: i64) -> bool {
+    let Some(now_utc) = chrono::DateTime::<chrono::Utc>::from_timestamp(now_ns / 1_000_000_000, 0)
+    else {
+        return false;
+    };
+
+    let local_offset = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+    let local_time = now_utc.with_timezone(&local_offset);
+    let current_minutes = local_time.hour() * 60 + local_time.minute();
+
+    market_hours.sessions.iter().any(|session| {
+        let Some(start) = parse_session_minutes(&session.start) else {
+            return false;
+        };
+        let Some(end) = parse_session_minutes(&session.end) else {
+            return false;
+        };
+
+        if start == end {
+            return false;
+        }
+
+        if start < end {
+            start <= current_minutes && current_minutes < end
+        } else {
+            current_minutes >= start || current_minutes < end
+        }
+    })
+}
+
+async fn fetch_history_with_policy<FMarket, FMarketFut, FRemote, FRemoteFut>(
+    cache: Option<&HistoryCache>,
+    symbol: &str,
+    duration: Duration,
+    count: usize,
+    now_ns: i64,
+    fetch_market_hours: FMarket,
+    fetch_remote_history: FRemote,
+) -> Result<Vec<KlineBar>>
+where
+    FMarket: Fn() -> FMarketFut,
+    FMarketFut: Future<Output = Result<FuturesMarketHours>>,
+    FRemote: Fn() -> FRemoteFut,
+    FRemoteFut: Future<Output = Result<Vec<KlineBar>>>,
+{
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let cache_key = crate::storage::cache::CacheKey::new(symbol, duration);
+
+    if let Some(cache) = cache {
+        let (start_id, end_id) = compute_cache_window(duration, count, now_ns);
+        let cached = cache.get(&cache_key, start_id, end_id);
+        let has_pending = cache.has_pending_symbol(symbol);
+
+        if cached.len() >= count && !has_pending {
+            tracing::debug!("缓存命中: {} {} bars", symbol, cached.len());
+            return Ok(cached);
+        }
+
+        match fetch_market_hours().await {
+            Ok(market_hours) if !is_market_open_at(&market_hours, now_ns) => {
+                if has_pending && let Err(err) = cache.flush_pending_symbol(symbol) {
+                    tracing::warn!("闭市刷新待写入 K 线缓存失败: {}", err);
+                }
+                let cached_latest = cache.latest(&cache_key, count);
+                if !cached_latest.is_empty() {
+                    tracing::debug!("闭市命中缓存尾部: {} {} bars", symbol, cached_latest.len());
+                    return Ok(cached_latest);
+                }
+
+                return Err(SdkError::HistoryUnavailable(symbol.to_string()));
+            }
+            Ok(_) | Err(_) if cached.len() >= count => {
+                tracing::debug!("缓存命中: {} {} bars", symbol, cached.len());
+                return Ok(cached);
+            }
+            Ok(_) | Err(_) => {}
+        }
+    }
+
+    let bars = fetch_remote_history().await?;
+
+    if let Some(cache) = cache
+        && let Err(e) = cache.put(&cache_key, &bars)
+    {
+        tracing::warn!("缓存写入失败: {}", e);
+    }
+
+    if let Some(cache) = cache {
+        let merged = cache.latest(&cache_key, count);
+        if !merged.is_empty() {
+            return Ok(merged);
+        }
+    }
+
+    Ok(take_tail_bars(bars, count))
 }
 
 async fn buffer_quotes_until_ready<T, Fut>(
@@ -224,6 +351,8 @@ pub struct SinaQuotes {
     realtime_kline_engines: Arc<RwLock<HashMap<String, RealtimeKlineEngine>>>,
     /// 历史数据缓存
     cache: Option<Arc<HistoryCache>>,
+    /// 最新行情快照缓存
+    quote_cache: Option<Arc<QuoteCache>>,
     /// 交易时间段缓存
     market_hours_cache: Arc<StdRwLock<HashMap<String, MarketHoursCacheEntry>>>,
     /// 更新通知
@@ -248,8 +377,16 @@ impl SinaQuotes {
         let (update_tx, update_rx) = watch::channel(0u64);
 
         let cache = if let Some(cache_dir) = &config.cache_dir {
-            let c = HistoryCache::open(cache_dir)
+            let c = HistoryCache::open_with_capacity(cache_dir, Some(config.cache_capacity as u64))
                 .map_err(|e| SdkError::Init(format!("缓存初始化失败: {}", e)))?;
+            Some(Arc::new(c))
+        } else {
+            None
+        };
+
+        let quote_cache = if let Some(cache_dir) = &config.cache_dir {
+            let c = QuoteCache::new(cache_dir.join("quotes"))
+                .map_err(|e| SdkError::Init(format!("行情缓存初始化失败: {}", e)))?;
             Some(Arc::new(c))
         } else {
             None
@@ -262,6 +399,7 @@ impl SinaQuotes {
             quote_feed_manager: QuoteFeedManager::new(),
             realtime_kline_engines: Arc::new(RwLock::new(HashMap::new())),
             cache,
+            quote_cache,
             market_hours_cache: Arc::new(StdRwLock::new(HashMap::new())),
             update_tx,
             update_rx,
@@ -333,11 +471,31 @@ impl SinaQuotes {
         series.values().cloned().collect()
     }
 
+    async fn hydrate_cached_quote_if_needed(&self, symbol: &str) {
+        let Some(quote_cache) = self.quote_cache.as_ref() else {
+            return;
+        };
+
+        match quote_cache.get(symbol) {
+            Ok(Some(quote)) => {
+                self.quote_manager.update(quote).await;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!("读取行情快照缓存失败: {}", err);
+            }
+        }
+    }
+
     // ===================== 实时行情 =====================
 
     /// 订阅实时行情
     pub async fn subscribe_quotes(&self, symbols: &[&str]) -> Result<Vec<QuoteStream>> {
         self._check_closed().await?;
+
+        for &symbol in symbols {
+            self.hydrate_cached_quote_if_needed(symbol).await;
+        }
 
         let streams = self.quote_manager.subscribe_multiple(symbols).await;
         Ok(streams)
@@ -346,6 +504,7 @@ impl SinaQuotes {
     /// 订阅单个行情
     pub async fn subscribe_quote(&self, symbol: &str) -> Result<QuoteStream> {
         self._check_closed().await?;
+        self.hydrate_cached_quote_if_needed(symbol).await;
         Ok(self.quote_manager.subscribe(symbol).await)
     }
 
@@ -451,6 +610,29 @@ impl SinaQuotes {
 
     /// 更新行情（内部使用）
     pub async fn _update_quote(&mut self, quote: Quote) {
+        let previous = self
+            .quote_cache
+            .as_ref()
+            .and_then(|cache| match cache.get(&quote.symbol) {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!("读取行情快照缓存失败: {}", err);
+                    None
+                }
+            });
+
+        if let Some(cache) = self.cache.as_ref()
+            && let Err(err) = cache.apply_quote(previous.as_ref(), &quote)
+        {
+            tracing::warn!("实时行情写入 K 线缓存失败: {}", err);
+        }
+
+        if let Some(quote_cache) = self.quote_cache.as_ref()
+            && let Err(err) = quote_cache.put(&quote)
+        {
+            tracing::warn!("实时行情写入快照缓存失败: {}", err);
+        }
+
         self.quote_manager.update(quote.clone()).await;
 
         // 更新 generation
@@ -499,42 +681,27 @@ impl SinaQuotes {
         duration: Duration,
         count: usize,
     ) -> Result<Vec<KlineBar>> {
-        // 1. 尝试从缓存读取
-        if let Some(cache) = &self.cache {
-            let cache_key = crate::storage::cache::CacheKey::new(symbol, duration);
-            let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-            let (start_id, end_id) = compute_cache_window(duration, count, now_ns);
-            let cached = cache.get(&cache_key, start_id, end_id);
-
-            if cached.len() >= count {
-                tracing::debug!("缓存命中: {} {} bars", symbol, cached.len());
-                return Ok(cached);
-            }
-        }
-
-        // 2. 从网络获取
         let duration_seconds = duration.as_secs() as u32;
-        let bars = history::fetch_history(symbol, duration_seconds, 3)
-            .await
-            .map_err(|e| match e {
-                history::Error::Request(e) => SdkError::Http(e),
-                history::Error::Parse(s) => SdkError::Parse(s),
-                history::Error::Empty => SdkError::HistoryUnavailable(symbol.to_string()),
-            })?;
+        let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
-        // 3. 存入缓存
-        if let Some(cache) = &self.cache {
-            let cache_key = crate::storage::cache::CacheKey::new(symbol, duration);
-            // 需要转换回可序列化的格式
-            let cache_bars: Vec<KlineBar> = bars.to_vec();
-            if let Err(e) = cache.put(&cache_key, &cache_bars) {
-                tracing::warn!("缓存写入失败: {}", e);
-            }
-        }
-
-        // 4. 限制数量
-        let result: Vec<KlineBar> = bars.into_iter().take(count).collect();
-        Ok(result)
+        fetch_history_with_policy(
+            self.cache.as_deref(),
+            symbol,
+            duration,
+            count,
+            now_ns,
+            || self.fetch_market_hours(symbol),
+            || async move {
+                history::fetch_history(symbol, duration_seconds, 3)
+                    .await
+                    .map_err(|e| match e {
+                        history::Error::Request(e) => SdkError::Http(e),
+                        history::Error::Parse(s) => SdkError::Parse(s),
+                        history::Error::Empty => SdkError::HistoryUnavailable(symbol.to_string()),
+                    })
+            },
+        )
+        .await
     }
 
     /// 预热缓存
@@ -563,23 +730,25 @@ impl SinaQuotes {
 
         tracing::info!("预热缓存: {} 需要下载 {} 段", symbol, missing.len());
 
-        // 下载每段数据
-        for (start, _end) in missing {
-            let duration_seconds = duration.as_secs() as u32;
+        let duration_seconds = duration.as_secs() as u32;
+        let bars = history::fetch_history(symbol, duration_seconds, 3)
+            .await
+            .map_err(|e| match e {
+                history::Error::Request(e) => SdkError::Http(e),
+                history::Error::Parse(s) => SdkError::Parse(s),
+                history::Error::Empty => SdkError::HistoryUnavailable(symbol.to_string()),
+            })?;
 
-            match history::fetch_history(symbol, duration_seconds, 3).await {
-                Ok(mut bars) => {
-                    for bar in &mut bars {
-                        bar.id = start + bar.id - 1;
-                    }
-                    if let Err(e) = cache.put(&cache_key, &bars) {
-                        tracing::warn!("缓存写入失败: {}", e);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("预热下载失败: {:?}", e);
-                }
-            }
+        if let Err(e) = cache.put(&cache_key, &bars) {
+            tracing::warn!("缓存写入失败: {}", e);
+        }
+
+        let still_missing = cache.missing_ranges(&cache_key, start_id, end_id);
+        if !still_missing.is_empty() {
+            return Err(SdkError::HistoryUnavailable(format!(
+                "{}: 新浪历史接口只能返回最新固定窗口，无法补齐请求范围 {:?}",
+                symbol, still_missing
+            )));
         }
 
         Ok(())
@@ -615,6 +784,11 @@ impl SinaQuotes {
                 .clear_all()
                 .map_err(|e| SdkError::Init(e.to_string()))?;
         }
+        if let Some(quote_cache) = &self.quote_cache {
+            quote_cache
+                .clear_all()
+                .map_err(|e| SdkError::Init(e.to_string()))?;
+        }
         self.market_hours_cache.write().unwrap().clear();
         Ok(())
     }
@@ -628,6 +802,12 @@ impl SinaQuotes {
 
     /// 关闭客户端
     pub async fn close(self) {
+        if let Some(cache) = self.cache.as_ref()
+            && let Err(err) = cache.flush_pending_all()
+        {
+            tracing::warn!("关闭前刷新待写入 K 线缓存失败: {}", err);
+        }
+
         let mut closed = self.closed.write().await;
         *closed = true;
 
@@ -665,6 +845,8 @@ impl SinaQuotes {
             symbols,
             self.quote_manager.clone(),
             self.quote_feed_manager.clone(),
+            self.cache.clone(),
+            self.quote_cache.clone(),
             self.config.ws_reconnect_delay,
             self.config.max_reconnect_attempts,
         );
@@ -724,6 +906,7 @@ impl Clone for SinaQuotes {
             quote_feed_manager: self.quote_feed_manager.clone(),
             realtime_kline_engines: Arc::clone(&self.realtime_kline_engines),
             cache: self.cache.clone(),
+            quote_cache: self.quote_cache.clone(),
             market_hours_cache: Arc::clone(&self.market_hours_cache),
             update_tx: self.update_tx.clone(),
             update_rx: self.update_rx.clone(),
@@ -750,6 +933,7 @@ mod tests {
     use crate::data::types::{FuturesCategory, TradingSession};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
+    use tempfile::tempdir;
 
     fn make_market_hours(symbol: &str, timezone: &str) -> FuturesMarketHours {
         FuturesMarketHours {
@@ -763,6 +947,26 @@ mod tests {
                 end: "15:00".to_string(),
             }],
         }
+    }
+
+    fn make_bar(id: i64) -> KlineBar {
+        KlineBar {
+            id,
+            datetime: id * 60 * 1_000_000_000,
+            open: 100.0 + id as f64,
+            high: 101.0 + id as f64,
+            low: 99.0 + id as f64,
+            close: 100.5 + id as f64,
+            volume: 1000.0 + id as f64,
+            open_interest: 0.0,
+        }
+    }
+
+    fn fixed_now_ns(rfc3339: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap()
     }
 
     #[tokio::test]
@@ -986,5 +1190,236 @@ mod tests {
             .unwrap();
         assert_eq!(ev.bar.close, 5.0);
         assert!(!ev.is_completed);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_history_with_policy_uses_cache_tail_when_market_closed() {
+        let dir = tempdir().unwrap();
+        let cache = HistoryCache::open(dir.path()).unwrap();
+        let key = crate::storage::cache::CacheKey::new("hf_TEST", Duration::minutes(1));
+        cache
+            .put(&key, &[make_bar(1), make_bar(2), make_bar(3)])
+            .unwrap();
+
+        let market_fetches = Arc::new(AtomicUsize::new(0));
+        let remote_fetches = Arc::new(AtomicUsize::new(0));
+
+        let bars = fetch_history_with_policy(
+            Some(&cache),
+            "hf_TEST",
+            Duration::minutes(1),
+            2,
+            fixed_now_ns("2026-04-18T20:00:00+08:00"),
+            {
+                let market_fetches = Arc::clone(&market_fetches);
+                move || {
+                    let market_fetches = Arc::clone(&market_fetches);
+                    async move {
+                        market_fetches.fetch_add(1, Ordering::SeqCst);
+                        Ok(make_market_hours("hf_TEST", "summer"))
+                    }
+                }
+            },
+            {
+                let remote_fetches = Arc::clone(&remote_fetches);
+                move || {
+                    let remote_fetches = Arc::clone(&remote_fetches);
+                    async move {
+                        remote_fetches.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![make_bar(100), make_bar(101)])
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        let ids: Vec<i64> = bars.iter().map(|bar| bar.id).collect();
+        assert_eq!(ids, vec![2, 3]);
+        assert_eq!(market_fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(remote_fetches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_history_with_policy_does_not_fetch_remote_when_market_closed_and_cache_empty()
+     {
+        let dir = tempdir().unwrap();
+        let cache = HistoryCache::open(dir.path()).unwrap();
+
+        let market_fetches = Arc::new(AtomicUsize::new(0));
+        let remote_fetches = Arc::new(AtomicUsize::new(0));
+
+        let err = fetch_history_with_policy(
+            Some(&cache),
+            "hf_TEST",
+            Duration::minutes(1),
+            2,
+            fixed_now_ns("2026-04-18T20:00:00+08:00"),
+            {
+                let market_fetches = Arc::clone(&market_fetches);
+                move || {
+                    let market_fetches = Arc::clone(&market_fetches);
+                    async move {
+                        market_fetches.fetch_add(1, Ordering::SeqCst);
+                        Ok(make_market_hours("hf_TEST", "summer"))
+                    }
+                }
+            },
+            {
+                let remote_fetches = Arc::clone(&remote_fetches);
+                move || {
+                    let remote_fetches = Arc::clone(&remote_fetches);
+                    async move {
+                        remote_fetches.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![make_bar(100), make_bar(101)])
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, SdkError::HistoryUnavailable(symbol) if symbol == "hf_TEST"));
+        assert_eq!(market_fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(remote_fetches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_history_with_policy_fetches_remote_when_market_open_and_cache_incomplete() {
+        let dir = tempdir().unwrap();
+        let cache = HistoryCache::open(dir.path()).unwrap();
+        let key = crate::storage::cache::CacheKey::new("hf_TEST", Duration::minutes(1));
+        cache.put(&key, &[make_bar(1)]).unwrap();
+
+        let market_fetches = Arc::new(AtomicUsize::new(0));
+        let remote_fetches = Arc::new(AtomicUsize::new(0));
+
+        let bars = fetch_history_with_policy(
+            Some(&cache),
+            "hf_TEST",
+            Duration::minutes(1),
+            2,
+            fixed_now_ns("2026-04-18T10:00:00+08:00"),
+            {
+                let market_fetches = Arc::clone(&market_fetches);
+                move || {
+                    let market_fetches = Arc::clone(&market_fetches);
+                    async move {
+                        market_fetches.fetch_add(1, Ordering::SeqCst);
+                        Ok(make_market_hours("hf_TEST", "summer"))
+                    }
+                }
+            },
+            {
+                let remote_fetches = Arc::clone(&remote_fetches);
+                move || {
+                    let remote_fetches = Arc::clone(&remote_fetches);
+                    async move {
+                        remote_fetches.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![make_bar(100), make_bar(101)])
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        let ids: Vec<i64> = bars.iter().map(|bar| bar.id).collect();
+        assert_eq!(ids, vec![100, 101]);
+        assert_eq!(market_fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(remote_fetches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_history_with_policy_returns_remote_tail_for_fixed_window_api() {
+        let bars = fetch_history_with_policy(
+            None,
+            "hf_TEST",
+            Duration::minutes(1),
+            2,
+            fixed_now_ns("2026-04-18T10:00:00+08:00"),
+            || async { Ok(make_market_hours("hf_TEST", "summer")) },
+            || async { Ok(vec![make_bar(1), make_bar(2), make_bar(3)]) },
+        )
+        .await
+        .unwrap();
+
+        let ids: Vec<i64> = bars.iter().map(|bar| bar.id).collect();
+        assert_eq!(ids, vec![2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_history_with_policy_merges_remote_fixed_window_into_cached_tail() {
+        let dir = tempdir().unwrap();
+        let cache = HistoryCache::open(dir.path()).unwrap();
+        let key = crate::storage::cache::CacheKey::new("hf_TEST", Duration::minutes(1));
+        cache.put(&key, &[make_bar(1), make_bar(2)]).unwrap();
+
+        let bars = fetch_history_with_policy(
+            Some(&cache),
+            "hf_TEST",
+            Duration::minutes(1),
+            4,
+            fixed_now_ns("2026-04-18T10:00:00+08:00"),
+            || async { Ok(make_market_hours("hf_TEST", "summer")) },
+            || async { Ok(vec![make_bar(3), make_bar(4)]) },
+        )
+        .await
+        .unwrap();
+
+        let ids: Vec<i64> = bars.iter().map(|bar| bar.id).collect();
+        assert_eq!(ids, vec![1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_quote_replays_cached_snapshot_after_restart() {
+        let dir = tempdir().unwrap();
+        let client1 = SinaQuotes::builder()
+            .cache_dir(dir.path().to_path_buf())
+            .build()
+            .await
+            .unwrap();
+
+        client1
+            .quote_cache
+            .as_ref()
+            .unwrap()
+            .put(&Quote {
+                symbol: "hf_CL".to_string(),
+                price: 88.5,
+                bid_price: 88.4,
+                ask_price: 88.6,
+                volume: 1234.0,
+                prev_settle: 87.0,
+                settle_price: 88.0,
+                timestamp: 1_713_456_789,
+                date: "2026-04-18".to_string(),
+                quote_time: "14:59:59".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        drop(client1);
+
+        let client2 = SinaQuotes::builder()
+            .cache_dir(dir.path().to_path_buf())
+            .build()
+            .await
+            .unwrap();
+
+        let mut stream = client2.subscribe_quote("hf_CL").await.unwrap();
+
+        tokio::time::timeout(StdDuration::from_millis(50), stream.changed())
+            .await
+            .expect("cached quote should be replayed")
+            .expect("watch channel should stay open");
+
+        let quote = stream.get();
+        assert_eq!(quote.symbol, "hf_CL");
+        assert_eq!(quote.price, 88.5);
+        assert_eq!(quote.bid_price, 88.4);
+        assert_eq!(quote.ask_price, 88.6);
+        assert_eq!(quote.volume, 1234.0);
+        assert_eq!(quote.quote_time, "14:59:59");
+        assert_eq!(quote.date, "2026-04-18");
     }
 }

@@ -60,12 +60,12 @@ async fn run_history(client: &SinaQuotes, symbol: &str) -> Result<(), Box<dyn st
         .await
         .map_err(|e| format!("获取 K 线失败: {}", e))?;
 
+    let bars = series.read_all();
     println!("   符号: {}", series.symbol());
     println!("   周期: {}", series.duration());
-    println!("   数量: {} / {}", series.len(), series.capacity());
+    println!("   数量: {} / {}", bars.len(), series.capacity());
 
     println!("\n3. 读取 K 线数据...");
-    let bars = series.read();
     for (i, bar) in bars.iter().take(5).enumerate() {
         println!("   [{}] {}", i, bar);
     }
@@ -87,7 +87,14 @@ async fn run_quote(client: &SinaQuotes, symbol: &str) -> Result<(), Box<dyn std:
 
     println!("等待 20 次行情更新...\n");
     for i in 0..20 {
-        quote_stream.changed().await?;
+        match tokio::time::timeout(StdDuration::from_secs(10), quote_stream.changed()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(err.into()),
+            Err(_) => {
+                println!("   10 秒内没有新行情，退出。");
+                break;
+            }
+        }
         let q = quote_stream.get();
         println!("   [Q{:02}] {}", i, q);
     }
@@ -143,25 +150,40 @@ async fn run_combo(client: &SinaQuotes, symbol: &str) -> Result<(), Box<dyn std:
     let max_quote_updates = 50;
     let mut kline_update_count = 0;
     let max_kline_updates = 50;
+    let idle_timeout = StdDuration::from_secs(10);
 
     loop {
-        tokio::select! {
-            res = quote_stream.changed() => {
-                if res.is_err() {
-                    break;
+        let activity = tokio::time::timeout(idle_timeout, async {
+            tokio::select! {
+                res = quote_stream.changed() => {
+                    if res.is_err() {
+                        return false;
+                    }
+                    let q = quote_stream.get();
+                    println!("   [Q{:02}] {}", quote_update_count, q);
+                    quote_update_count += 1;
+                    true
                 }
-                let q = quote_stream.get();
-                println!("   [Q{:02}] {}", quote_update_count, q);
-                quote_update_count += 1;
+                ev = kline_sub.next() => {
+                    let Some(ev) = ev else { return false; };
+                    if ev.is_completed {
+                        println!("   [K{:02}] 完结 {}", kline_update_count, ev.bar);
+                    } else {
+                        println!("   [K{:02}] 更新 {}", kline_update_count, ev.bar);
+                    }
+                    kline_update_count += 1;
+                    true
+                }
             }
-            ev = kline_sub.next() => {
-                let Some(ev) = ev else { break; };
-                if ev.is_completed {
-                    println!("   [K{:02}] 完结 {}", kline_update_count, ev.bar);
-                } else {
-                    println!("   [K{:02}] 更新 {}", kline_update_count, ev.bar);
-                }
-                kline_update_count += 1;
+        })
+        .await;
+
+        match activity {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(_) => {
+                println!("   10 秒内没有新更新，退出。");
+                break;
             }
         }
 
