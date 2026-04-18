@@ -37,8 +37,10 @@ description: Use when the user wants Sina futures market data, especially overse
 - 这是 `tokio` 异步库。默认给出异步 Rust 示例。
 - 这个库的历史 K 线和实时行情主要处理外盘符号；如果是交易时间段接口，说明它会按 `symbol` 自动识别市场即可，不必展开前缀规则。
 - 历史 K 线入口是 `client.get_kline_serial(symbol, duration, count).await?`。
+- 展示全部已拿到的 K 线时，优先使用 `series.read_all()`；它包含当前正在形成的 bar。`series.read()` 只返回已完成 bar。
 - 交易时间段入口是 `client.fetch_market_hours(symbol).await?`。
 - 交易时间段结果会在客户端内按 TTL 缓存；如果用户明确关心刷新周期，再提 `market_hours_cache_ttl(...)`。
+- 默认配置会启用磁盘缓存，默认根目录是 `$HOME/.sina-quotes`；只有用户需要自定义位置时，再展示 `.cache_dir(...)`。
 - `subscribe_quote()` / `subscribe_quotes()` 只创建本地流句柄；想收到持续更新，必须再调用 `start_websocket(vec![...]).await?`。
 - `subscribe_realtime_kline()` 的实时事件同样依赖 `start_websocket(...)`。它基于 Quote 流聚合，不是第二套独立行情源。
 - 同一个 `SinaQuotes` 客户端只能启动一个 WebSocket 连接。需要多个品种时，把所有符号一次性传给 `start_websocket(...)`。
@@ -49,6 +51,7 @@ description: Use when the user wants Sina futures market data, especially overse
 
 - 优先输出可直接复制运行的最小完整 Rust 示例。
 - 如果用户只是想快速验证数据，优先给 CLI 命令或 `cargo run --example ...`。
+- 如果用户只是想快速验证实时 Quote，优先给 `cargo run -- subscribe <symbol...>`；它现在会直接打印实时行情并在空闲时自动退出。
 - 如果用户问的是交易时间段，优先给 `fetch_market_hours(symbol)` 或 `cargo run -- market-hours <symbol>`。
 - 做实时订阅时，必须把“创建订阅句柄”和“启动 WebSocket”两步都写出来，不能省略。
 - 如果用户没给符号，优先举 `hf_OIL`、`hf_CL`、`hf_GC`、`hf_SI` 这类外盘例子。

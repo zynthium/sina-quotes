@@ -44,12 +44,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let series = client
         .get_kline_serial("hf_OIL", Duration::minutes(5), 100)
         .await?;
+    let bars = series.read_all();
 
     println!("symbol={}", series.symbol());
     println!("duration={}", series.duration());
-    println!("len={}/{}", series.len(), series.capacity());
+    println!("len={}/{}", bars.len(), series.capacity());
 
-    for bar in series.read().iter().take(5) {
+    for bar in bars.iter().take(5) {
         println!("{}", bar);
     }
 
@@ -63,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - 默认优先使用 `Duration::minutes(1)`、`Duration::minutes(5)`、`Duration::minutes(15)`、`Duration::hours(1)`、`Duration::days(1)`
 - `count` 表示希望保留的序列长度
 - `KlineSeries` 是句柄，不是一次性返回的裸 `Vec<KlineBar>`
+- `series.read_all()` 包含当前正在形成的 bar；`series.read()` 只包含已完成 bar
 
 ## 实时 Quote
 
@@ -196,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 可选配置
 
-如果需要缓存或超时配置，使用 builder：
+默认配置已经会启用磁盘缓存，默认根目录是 `$HOME/.sina-quotes`。如果需要自定义缓存目录或其他超时配置，再使用 builder：
 
 ```rust
 use sina_quotes::SinaQuotes;
@@ -225,6 +227,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `cache_dir(...)`
 - `cache_capacity(...)`
 - `market_hours_cache_ttl(...)`
+
+如果只是接受默认缓存位置，直接 `SinaQuotes::new().await?` 即可。
 
 ## 常见坑
 
@@ -263,3 +267,11 @@ client.start_websocket(vec!["hf_OIL".to_string()]).await?;
 ```rust
 client.close().await;
 ```
+
+### 6. 用 `read()` 展示全部 K 线
+
+如果你想展示当前拿到的整段序列，优先用 `read_all()`，因为：
+
+- `read_all()` 包含当前正在形成的 bar
+- `read()` 只返回已完成 bar
+- `series.len()` 与 `read_all().len()` 一致，不一定与 `read().len()` 一致

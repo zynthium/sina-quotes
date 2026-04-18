@@ -78,3 +78,8 @@ src/
 ## 样式参考
 
 遵循全局 Rust 规则：`~/.claude/rules/rust/`
+
+
+## 版本管理
+
+自动维护版本号，采用semver规范。

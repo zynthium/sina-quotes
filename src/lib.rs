@@ -24,9 +24,10 @@
 //!     let series = client
 //!         .get_kline_serial("hf_CL", Duration::minutes(5), 100)
 //!         .await?;
+//!     let bars = series.read_all();
 //!
 //!     // 读取数据
-//!     for bar in series.read() {
+//!     for bar in bars {
 //!         println!("#{:03} O={:.2} H={:.2} L={:.2} C={:.2}",
 //!             bar.id, bar.open, bar.high, bar.low, bar.close);
 //!     }

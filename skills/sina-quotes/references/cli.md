@@ -41,7 +41,16 @@ cargo run -- market-hours hf_FEF
 
 ## 实时行情与实时 K 线
 
-如果只是想快速验证实时流程，优先使用仓库里的 `examples/`，因为这些例子已经把订阅句柄和 WebSocket 启动流程写完整了。
+如果只是想快速验证实时 Quote，优先直接使用主 CLI：
+
+```bash
+cargo run -- subscribe hf_OIL
+cargo run -- subscribe hf_OIL hf_GC
+```
+
+这个命令现在会真正启动 WebSocket、打印实时行情，并在空闲一段时间后自动退出。
+
+如果想验证更细分的实时消费方式，再使用仓库里的 `examples/`。
 
 单品种实时 Quote：
 
@@ -85,6 +94,7 @@ cargo run --example new_api cache
 - 只想快速确认某个国内 / 国外期货品种的交易时段
 - 想快速验证 `hf_OIL`、`hf_CL`、`hf_GC` 这类符号是否可读
 - 想做 demo、排查网络、观察输出格式
+- 想快速验证主 CLI 的实时订阅链路是否正常
 
 优先用库 API：
 
