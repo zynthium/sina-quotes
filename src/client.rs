@@ -141,13 +141,39 @@ where
                 if has_pending && let Err(err) = cache.flush_pending_symbol(symbol) {
                     tracing::warn!("闭市刷新待写入 K 线缓存失败: {}", err);
                 }
-                let cached_latest = cache.latest(&cache_key, count);
-                if !cached_latest.is_empty() {
-                    tracing::debug!("闭市命中缓存尾部: {} {} bars", symbol, cached_latest.len());
-                    return Ok(cached_latest);
-                }
 
-                return Err(SdkError::HistoryUnavailable(symbol.to_string()));
+                // 闭市 & 缓存不完整 → 尝试远端历史接口
+                tracing::debug!(
+                    "闭市缓存不足: {} 需要 {} 仅有 {}, 尝试远端接口",
+                    symbol,
+                    count,
+                    cached.len()
+                );
+                match fetch_remote_history().await {
+                    Ok(bars) => {
+                        if let Err(e) = cache.put(&cache_key, &bars) {
+                            tracing::warn!("缓存写入失败: {}", e);
+                        }
+                        let merged = cache.latest(&cache_key, count);
+                        if !merged.is_empty() {
+                            return Ok(merged);
+                        }
+                        return Ok(take_tail_bars(bars, count));
+                    }
+                    Err(_) => {
+                        // 远端失败 → 降级用缓存尾部
+                        let cached_latest = cache.latest(&cache_key, count);
+                        if !cached_latest.is_empty() {
+                            tracing::debug!(
+                                "闭市降级缓存尾部(远端失败): {} {} bars",
+                                symbol,
+                                cached_latest.len()
+                            );
+                            return Ok(cached_latest);
+                        }
+                        return Err(SdkError::HistoryUnavailable(symbol.to_string()));
+                    }
+                }
             }
             Ok(_) | Err(_) if cached.len() >= count => {
                 tracing::debug!("缓存命中: {} {} bars", symbol, cached.len());
@@ -323,6 +349,14 @@ impl ClientBuilder {
         self
     }
 
+    /// 禁用本地磁盘缓存
+    ///
+    /// 默认启用缓存（`~/.sina-quotes`）。调用此方法可完全关闭磁盘缓存。
+    pub fn disable_cache(mut self) -> Self {
+        self.config.cache_dir = None;
+        self
+    }
+
     pub async fn build(self) -> Result<SinaQuotes> {
         SinaQuotes::with_config(self.config).await
     }
@@ -429,9 +463,14 @@ impl SinaQuotes {
 
     // ===================== K线序列 =====================
 
+    fn kline_series_key(symbol: &str, duration: Duration, data_length: usize) -> String {
+        format!("{}_{}_{}", symbol, duration.as_secs(), data_length)
+    }
+
     /// 获取 K线序列
     ///
     /// 自动从缓存或网络加载历史数据，然后返回序列句柄。
+    /// 不同 `data_length` 对应不同的序列实例。
     pub async fn get_kline_serial(
         &self,
         symbol: &str,
@@ -440,7 +479,7 @@ impl SinaQuotes {
     ) -> Result<KlineSeries> {
         self._check_closed().await?;
 
-        let key = format!("{}_{}", symbol, duration.as_secs());
+        let key = Self::kline_series_key(symbol, duration, data_length);
 
         // 检查是否已有序列
         {
@@ -468,14 +507,26 @@ impl SinaQuotes {
     }
 
     /// 获取已有的 K线序列（不自动加载）
+    ///
+    /// `data_length` 用于匹配序列的请求长度；传 `0` 可匹配任意长度（取最大者）。
     pub async fn get_kline_serial_if_exists(
         &self,
         symbol: &str,
         duration: Duration,
+        data_length: usize,
     ) -> Option<KlineSeries> {
-        let key = format!("{}_{}", symbol, duration.as_secs());
         let series = self.series.read().await;
-        series.get(&key).cloned()
+        if data_length > 0 {
+            let key = Self::kline_series_key(symbol, duration, data_length);
+            return series.get(&key).cloned();
+        }
+        // data_length == 0: 匹配该 symbol+duration 下容量最大的序列
+        let prefix = format!("{}_{}_", symbol, duration.as_secs());
+        series
+            .iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .max_by_key(|(_, s)| s.capacity())
+            .map(|(_, s)| s.clone())
     }
 
     /// 获取所有 K线序列
@@ -546,15 +597,17 @@ impl SinaQuotes {
         }
 
         let mut feed_rx = self.quote_feed_manager.subscribe(symbol).await;
-        let (series, buffered_quotes) =
-            match self.get_kline_serial_if_exists(symbol, duration).await {
-                Some(s) => (s, Vec::new()),
-                None => {
-                    let fut = self.get_kline_serial(symbol, duration, data_length);
-                    let (res, buffered) = buffer_quotes_until_ready(&mut feed_rx, fut).await;
-                    (res?, buffered)
-                }
-            };
+        let (series, buffered_quotes) = match self
+            .get_kline_serial_if_exists(symbol, duration, data_length)
+            .await
+        {
+            Some(s) => (s, Vec::new()),
+            None => {
+                let fut = self.get_kline_serial(symbol, duration, data_length);
+                let (res, buffered) = buffer_quotes_until_ready(&mut feed_rx, fut).await;
+                (res?, buffered)
+            }
+        };
 
         let (tx, rx) = broadcast::channel(1024);
         let engine = RealtimeKlineEngine {
@@ -1125,7 +1178,8 @@ mod tests {
 
         let symbol = "hf_TEST";
         let duration = Duration::minutes(1);
-        let key = format!("{}_{}", symbol, duration.as_secs());
+        let data_length = 10;
+        let key = SinaQuotes::kline_series_key(symbol, duration, data_length);
 
         let series = KlineSeries::new(symbol.to_string(), duration, 10);
         {
@@ -1189,7 +1243,8 @@ mod tests {
 
         let symbol = "hf_TEST";
         let duration = Duration::minutes(1);
-        let key = format!("{}_{}", symbol, duration.as_secs());
+        let data_length = 10;
+        let key = SinaQuotes::kline_series_key(symbol, duration, data_length);
 
         let series = KlineSeries::new(symbol.to_string(), duration, 10);
         series.push(KlineBar {
@@ -1221,7 +1276,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_history_with_policy_uses_cache_tail_when_market_closed() {
+    async fn test_fetch_history_with_policy_fetches_remote_when_market_closed_and_cache_insufficient()
+     {
         let dir = tempdir().unwrap();
         let cache = HistoryCache::open(dir.path()).unwrap();
         let key = crate::storage::cache::CacheKey::new("hf_TEST", Duration::minutes(1));
@@ -1232,11 +1288,12 @@ mod tests {
         let market_fetches = Arc::new(AtomicUsize::new(0));
         let remote_fetches = Arc::new(AtomicUsize::new(0));
 
+        // 闭市 + 缓存不完整 → 应当请求远端，未请求的返回 cache 尾巴
         let bars = fetch_history_with_policy(
             Some(&cache),
             "hf_TEST",
             Duration::minutes(1),
-            2,
+            5, // 缓存只有 3 条，request 5 → 不满足
             fixed_now_ns("2026-04-18T20:00:00+08:00"),
             {
                 let market_fetches = Arc::clone(&market_fetches);
@@ -1254,7 +1311,64 @@ mod tests {
                     let remote_fetches = Arc::clone(&remote_fetches);
                     async move {
                         remote_fetches.fetch_add(1, Ordering::SeqCst);
-                        Ok(vec![make_bar(100), make_bar(101)])
+                        Ok(vec![
+                            make_bar(100),
+                            make_bar(101),
+                            make_bar(102),
+                            make_bar(103),
+                            make_bar(104),
+                        ])
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        // 远端成功 → 拿到远端数据（合并后取尾巴）
+        let ids: Vec<i64> = bars.iter().map(|bar| bar.id).collect();
+        assert_eq!(ids, vec![100, 101, 102, 103, 104]);
+        assert_eq!(market_fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(remote_fetches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_history_with_policy_falls_back_to_cache_tail_when_remote_fails_and_market_closed()
+     {
+        let dir = tempdir().unwrap();
+        let cache = HistoryCache::open(dir.path()).unwrap();
+        let key = crate::storage::cache::CacheKey::new("hf_TEST", Duration::minutes(1));
+        cache
+            .put(&key, &[make_bar(1), make_bar(2), make_bar(3)])
+            .unwrap();
+
+        let market_fetches = Arc::new(AtomicUsize::new(0));
+        let remote_fetches = Arc::new(AtomicUsize::new(0));
+
+        // 闭市 + 缓存不足 + 远端失败 → 降级到缓存尾巴
+        let bars = fetch_history_with_policy(
+            Some(&cache),
+            "hf_TEST",
+            Duration::minutes(1),
+            5,
+            fixed_now_ns("2026-04-18T20:00:00+08:00"),
+            {
+                let market_fetches = Arc::clone(&market_fetches);
+                move || {
+                    let market_fetches = Arc::clone(&market_fetches);
+                    async move {
+                        market_fetches.fetch_add(1, Ordering::SeqCst);
+                        Ok(make_market_hours("hf_TEST", "summer"))
+                    }
+                }
+            },
+            {
+                let remote_fetches = Arc::clone(&remote_fetches);
+                move || {
+                    let remote_fetches = Arc::clone(&remote_fetches);
+                    async move {
+                        remote_fetches.fetch_add(1, Ordering::SeqCst);
+                        Err(SdkError::HistoryUnavailable("hf_TEST".to_string()))
                     }
                 }
             },
@@ -1263,13 +1377,13 @@ mod tests {
         .unwrap();
 
         let ids: Vec<i64> = bars.iter().map(|bar| bar.id).collect();
-        assert_eq!(ids, vec![2, 3]);
+        assert_eq!(ids, vec![1, 2, 3]);
         assert_eq!(market_fetches.load(Ordering::SeqCst), 1);
-        assert_eq!(remote_fetches.load(Ordering::SeqCst), 0);
+        assert_eq!(remote_fetches.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn test_fetch_history_with_policy_does_not_fetch_remote_when_market_closed_and_cache_empty()
+    async fn test_fetch_history_with_policy_fails_when_market_closed_and_both_cache_and_remote_empty()
      {
         let dir = tempdir().unwrap();
         let cache = HistoryCache::open(dir.path()).unwrap();
@@ -1299,7 +1413,7 @@ mod tests {
                     let remote_fetches = Arc::clone(&remote_fetches);
                     async move {
                         remote_fetches.fetch_add(1, Ordering::SeqCst);
-                        Ok(vec![make_bar(100), make_bar(101)])
+                        Err(SdkError::HistoryUnavailable("hf_TEST".to_string()))
                     }
                 }
             },
@@ -1309,7 +1423,7 @@ mod tests {
 
         assert!(matches!(err, SdkError::HistoryUnavailable(symbol) if symbol == "hf_TEST"));
         assert_eq!(market_fetches.load(Ordering::SeqCst), 1);
-        assert_eq!(remote_fetches.load(Ordering::SeqCst), 0);
+        assert_eq!(remote_fetches.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -58,7 +58,7 @@ async fn main() -> Result<(), sina_quotes::SdkError> {
 统一的客户端入口，管理所有数据源和缓存：
 
 ```rust
-// 默认配置
+// 默认配置（已启用磁盘缓存至 ~/.sina-quotes）
 let client = SinaQuotes::new().await?;
 
 // 自定义配置
@@ -67,6 +67,12 @@ let client = SinaQuotes::builder()
     .default_data_length(200)
     .cache_dir("./cache".into())
     .market_hours_cache_ttl(Duration::from_secs(6 * 60 * 60))
+    .build()
+    .await?;
+
+// 完全禁用本地磁盘缓存
+let client = SinaQuotes::builder()
+    .disable_cache()
     .build()
     .await?;
 ```
@@ -416,7 +422,8 @@ use std::time::Duration as StdDuration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 第一次运行：会从服务器拉取历史并写入缓存目录
+    // 默认已启用缓存（~/.sina-quotes），此处指定自定义缓存目录
+    // 如需完全禁用缓存，调用 .disable_cache()
     let client = SinaQuotes::builder()
         .cache_dir("./cache".into())
         .default_data_length(300)
